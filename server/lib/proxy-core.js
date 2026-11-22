@@ -29,7 +29,7 @@ function routeOf(req) {
 }
 const GPT_METERED = /^\/v1\/(chat\/completions|responses|completions|embeddings)\/?$/;
 const CLAUDE_METERED = /^\/v1\/messages\/?$/;
-const OPENAI_UNUSABLE = /insufficient_quota|billing|hard[_ ]limit|quota/i;
+const OPENAI_UNUSABLE = /insufficient_quota|credit_balance|billing|hard[_ ]limit|quota/i;   // credit_balance_exhausted = 선불 크레딧 바닥(OpenAI 도움말)
 function gptResetMs(h) {
   // OpenAI: retry-after(초) 또는 x-ratelimit-reset-requests/tokens ('1s', '6m0s', '250ms')
   const ra = retryAfterMs(h.get('retry-after'));
@@ -363,4 +363,4 @@ async function testKey(key, upstream = 'https://api.anthropic.com', provider = '
 /** 키 모양으로 종류 판단: sk-ant- = Claude, 그 밖의 sk- = GPT */
 const providerOfKey = key => (/^sk-ant-/.test(key) ? 'claude' : 'gpt');
 
-module.exports = { KeyPool, testKey, providerOfKey, routeOf, COOLDOWN_MS };
+module.exports = { KeyPool, testKey, providerOfKey, routeOf, COOLDOWN_MS, judge };

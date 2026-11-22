@@ -1,6 +1,6 @@
 {
-  "version": "1.4.0",
-  "file": "app-1.4.0.asar",
-  "sha256": "0732489c756cc3af2f4123c6a3091743aad7e00b7a16eacad38c9f6bd98f9470",
-  "notes": "새 모델 가격(Fable·Mythos 5.2, GPT-6.2 Astra·Sol), 모르는 새 버전은 같은 계열 가격으로 추정, '가격 모름' 기록 다시 계산, 가격표 원격 갱신"
+  "version": "1.4.1",
+  "file": "app-1.4.1.asar",
+  "sha256": "c20f53aaf7431b23f554b8b23f9c0799886050f134fe2c3916bab991ec560e60",
+  "notes": "앱 맨 위 제목 옆에 버전 표시(누르면 업데이트 확인, 새 버전 준비되면 바로 적용)"
 }

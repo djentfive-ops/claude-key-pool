@@ -498,7 +498,20 @@ function renderUpdate() {
   } else box.classList.remove('show');
   const tail = !u ? '' : u.status === 'latest' ? ', 최신 버전' : u.status === 'ready' ? `, ${u.version} 대기 중` : u.status === 'no-channel' ? ', 업데이트 저장소 준비 전' : u.status === 'error' ? ', 업데이트 확인 실패' : '';
   $('#verText').textContent = `버전 ${S.version}${tail}`;
+  // 제목 옆 버전 표시
+  const chip = $('#verChip');
+  chip.className = 'ver-chip' + (u?.status === 'ready' ? ' ready' : u?.status === 'latest' ? ' latest' : u?.status === 'error' ? ' err' : '');
+  $('#verChipText').textContent = u?.status === 'ready' ? `v${S.version}, ${u.version} 준비됨` : `v${S.version}`;
+  chip.title = u?.status === 'ready' ? '눌러서 지금 새 버전 적용'
+    : u?.status === 'latest' ? `최신 버전이에요${u.checkedAt ? ` (${hhmm(u.checkedAt)} 확인)` : ''}. 눌러서 다시 확인`
+    : u?.status === 'error' ? '업데이트 확인 실패. 눌러서 다시 확인' : '눌러서 업데이트 확인';
 }
+$('#verChip').addEventListener('click', async () => {
+  if (S?.update?.status === 'ready') { toast(`${S.update.version}으로 다시 켜는 중`); await window.pool.applyUpdate(); return; }
+  $('#verChipText').textContent = '확인 중';
+  const u = await window.pool.checkUpdate();
+  toast(u?.status === 'ready' ? `새 버전 ${u.version}을 받아 뒀어요. 한 번 더 누르면 바로 적용돼요` : u?.status === 'latest' ? '최신 버전이에요' : '업데이트를 확인하지 못했어요');
+});
 $('#updNow').addEventListener('click', () => window.pool.applyUpdate());
 $('#checkUpd').addEventListener('click', async () => {
   const b = $('#checkUpd'); b.disabled = true; b.textContent = '확인 중';

@@ -453,3 +453,13 @@ select.name-input { appearance: auto; }
 .charges .day b { color: var(--ink); margin-left: 8px; }
 .charges-empty { color: var(--muted); padding: 14px 8px; display: block !important; background: none !important; }
 #ctabCalls .log { padding-top: 0; }
+
+/* ── 제목 옆 버전 표시 ─────────────────────────── */
+.ver-chip { -webkit-app-region: no-drag; display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--line); background: var(--strip); color: var(--muted);
+  border-radius: 999px; padding: 2px 10px 2px 8px; font-size: 12px; font-weight: 600; cursor: pointer; margin-left: 2px; white-space: nowrap; }
+.ver-chip:hover { border-color: var(--ink); color: var(--ink); }
+.ver-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--line); }
+.ver-chip.latest .ver-dot { background: var(--standby); }
+.ver-chip.ready { color: var(--ink); border-color: var(--focus); }
+.ver-chip.ready .ver-dot { background: var(--focus); }
+.ver-chip.err .ver-dot { background: var(--rest); }

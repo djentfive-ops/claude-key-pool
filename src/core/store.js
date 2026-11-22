@@ -55,7 +55,8 @@ function meta() { return data.keys.map(k => ({ id: k.id, name: k.name, tier: k.t
 function settings() { return data.settings; }
 // 관리 토큰 같은 비밀값 — 키와 같은 방식(윈도우 계정 암호화)으로 감싸서 저장
 function setSecret(name, value) { data.secrets = data.secrets || {}; if (value) data.secrets[name] = seal(String(value)); else delete data.secrets[name]; save(true); }
+function hasSecret(name) { return Boolean(data.secrets?.[name]); }   // 복호화 없이 있는지만
 function getSecret(name) { try { const v = data.secrets?.[name]; return v ? unseal(v) : null; } catch { return null; } }
 function setSetting(k, v) { data.settings[k] = v; save(true); }
 
-module.exports = { load, meta, keys, setSecret, getSecret, hasKey, addKey, update, remove, move, counts, settings, setSetting, flush: () => save(true) };
+module.exports = { load, meta, keys, setSecret, getSecret, hasSecret, hasKey, addKey, update, remove, move, counts, settings, setSetting, flush: () => save(true) };

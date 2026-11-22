@@ -123,10 +123,11 @@ function updateStrip(s, k, index, groupLen) {
   refs.fuelBar.hidden = !showGauge; refs.fuelSet.hidden = !!showGauge || k.tier === 'paid';
   if (showGauge) {
     refs.fuelLabel.textContent = '남은 크레딧';
-    refs.fuelVal.textContent = `약 ${usd(cs.remaining)}`;
+    refs.fuelVal.textContent = k.actual?.ok ? usd(cs.remaining) : `약 ${usd(cs.remaining)}`;
     refs.fuelFill.style.width = `${Math.round(cs.ratio * 100)}%`;
     refs.fuelFill.className = level(cs.ratio);
-    refs.fuelSub.textContent = `${usd(cs.amount)} 중, ${mdate(cs.nextRefill)} 다시 충전${cs.shared ? ' · PC+서버 합산' : ''}`;
+    refs.fuelSub.textContent = `${usd(cs.amount)} 중, ${mdate(cs.nextRefill)} 다시 충전${k.actual?.ok ? ' · 실제 사용액 기준' : cs.shared ? ' · PC+서버 합산' : ''}`;
+    refs.fuelSub.title = k.actual?.ok ? `공식 비용 보고서로 ${ago(k.actual.checkedAt).replace(' 사용', '')}에 확인한 실제 사용액(이번 주기 $${(k.actual.cycleCost || 0).toFixed(2)}) 기준이에요` : '';
   } else {
     refs.fuelLabel.textContent = k.tier === 'paid' ? '이번 달 사용' : '이번 달 사용';
     refs.fuelVal.textContent = usd(cs?.monthUsd ?? 0);
@@ -477,16 +478,41 @@ function openCredit(id) {
   const cs = k.creditState;
   $('#calibNote').textContent = (cs?.calibrated ? `${mdate(cs.calibratedAt)}에 실제 금액으로 맞춘 뒤부터 계산하고 있어요.` : 'Console 결제(Billing) 화면의 Promotional credits 금액을 넣으면 그 시점부터 정확하게 이어서 셉니다.')
     + (cs?.shared ? ' 이 키는 이 PC와 서버에서 함께 쓰여서, 두 곳 사용액을 합쳐 계산해요(어느 화면에서 고쳐도 양쪽에 같이 들어가요).' : '');
+  $('#adminInput').value = '';
+  $('#clearAdmin').hidden = !k.hasAdmin;
+  $('#actualNote').classList.remove('bad');
+  $('#actualNote').textContent = actualText(k);
+  $('#openBilling').dataset.url = (k.provider || 'claude') === 'gpt' ? 'https://platform.openai.com/settings/organization/billing/overview' : 'https://platform.claude.com/settings/billing';
+  $('#openAdminKeys').dataset.url = (k.provider || 'claude') === 'gpt' ? 'https://platform.openai.com/settings/organization/admin-keys' : 'https://platform.claude.com/settings/admin-keys';
   csheet.showModal();
 }
+function actualText(k) {
+  const a = k.actual, gpt = (k.provider || 'claude') === 'gpt';
+  if (a?.ok) return `${a.via === 'admin' ? '관리자 키로' : '이 키로(관리자 키 필요 없음)'} 실제 사용액을 10분마다 자동으로 읽고 있어요. 이번 주기 실제 사용 $${(a.cycleCost || 0).toFixed(2)} · ${ago(a.checkedAt).replace(' 사용', '')} 확인.`;
+  if (a?.error) return a.error;
+  if (a?.needAdmin) return `이 키로는 실제 사용액을 읽을 수 없어요. 이 계정의 관리자 키(${gpt ? 'sk-admin-…' : 'sk-ant-admin…'})를 넣으면 10분마다 자동으로 맞춰요.${gpt ? '' : ' Console이 개인 계정이면 먼저 조직을 만들어야 관리자 키를 만들 수 있어요.'}`;
+  return '매달 받는 크레딧과 충전일을 저장하면, 실제 사용액을 자동으로 읽을 수 있는지 확인해요.';
+}
 $('#creditCancel').addEventListener('click', () => csheet.close());
-$('#openBilling').addEventListener('click', () => window.pool.openExternal('https://platform.claude.com/settings/billing'));
+$('#openBilling').addEventListener('click', e => window.pool.openExternal(e.currentTarget.dataset.url || 'https://platform.claude.com/settings/billing'));
+$('#openAdminKeys').addEventListener('click', e => window.pool.openExternal(e.currentTarget.dataset.url));
+$('#clearAdmin').addEventListener('click', async () => { await window.pool.clearAdminKey(creditId); $('#clearAdmin').hidden = true; $('#actualNote').textContent = '관리자 키를 지웠어요.'; });
 $('#creditForm').addEventListener('submit', async e => {
   e.preventDefault();
   const v = csheet.querySelector('input[name=amt]:checked').value;
   const amount = v === 'custom' ? Number(String($('#amtCustom').value).replace(/[$,\s]/g, '')) : Number(v);
   const remaining = String($('#calibInput').value).replace(/[$,\s]/g, '');
   await window.pool.setCredit(creditId, amount, Number($('#refillDay').value), remaining === '' ? null : Number(remaining));
+  const admin = String($('#adminInput').value || '').trim();
+  if (admin) {
+    $('#actualNote').classList.remove('bad'); $('#actualNote').textContent = '관리자 키로 실제 사용액을 확인하는 중…';
+    const r = await window.pool.setAdminKey(creditId, admin);
+    if (!r.ok) { $('#actualNote').classList.add('bad'); $('#actualNote').textContent = r.error; return; }
+    $('#adminInput').value = '';
+    csheet.close(); toast(`실제 사용액으로 맞췄어요 — 이번 주기 사용 $${r.cycleCost.toFixed(2)}, 남은 $${r.remaining.toFixed(2)}`);
+    if (!$('#usageView').hidden) refreshUsage(true);
+    return;
+  }
   csheet.close(); toast('크레딧 설정을 저장했습니다');
   if (!$('#usageView').hidden) refreshUsage(true);
 });

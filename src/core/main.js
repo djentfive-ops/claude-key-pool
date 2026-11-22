@@ -6,6 +6,7 @@ const { KeyPool, testKey, providerOfKey } = require('./proxy-core');
 const { createUsageStore } = require('./usage-store');
 const { createRemote } = require('./remote');
 const pairs = require('./pairs');
+const actual = require('./actual');
 const pricing = require('./pricing');
 const { createUpdater } = require('./updater');
 const APP_VERSION = require('./package.json').version;
@@ -19,6 +20,11 @@ const UPSTREAM = ENV.CKP_UPSTREAM || 'https://api.anthropic.com';
 const UPSTREAM_GPT = ENV.CKP_UPSTREAM_GPT || 'https://api.openai.com';
 const ADDRESS = `http://127.0.0.1:${PORT}`;
 const startHidden = process.argv.includes('--hidden');
+// 처리 못 한 오류: 끄는 중(업데이트·종료)에는 조용히 넘기고, 평소에는 오류 기록 파일에 남긴다(앱은 계속 돈다)
+process.on('uncaughtException', e => {
+  if (quitting) return;
+  try { fs.appendFileSync(path.join(app.getPath('userData'), 'error.log'), `${new Date().toISOString()} ${e && e.stack || e}\n`); } catch {}
+});
 
 const gotLock = app.requestSingleInstanceLock();   // 이미 켜져 있으면 새로 켜지 않고 기존 창을 띄운다
 if (!gotLock) app.quit();
@@ -51,6 +57,8 @@ function renameShortcuts() {
 }
 
 let win = null, tray = null, quitting = false, portError = null;
+/** 창이 살아 있는지(업데이트로 꺼지는 중에는 창이 먼저 닫힌다) */
+const alive = () => Boolean(win) && !win.isDestroyed();
 const pool = new KeyPool({ port: PORT, upstream: UPSTREAM, upstreamGpt: UPSTREAM_GPT });
 let usage = null;   // app 준비 뒤 userData 경로가 정해지면 연다
 let updater = null;
@@ -79,6 +87,7 @@ function state() {
     if (rs.data?.pricesAsOf) out.pricesAsOf = rs.data.pricesAsOf;
   }
   // 같은 키(이 PC ↔ 서버)는 두 곳 사용액을 합쳐 남은 크레딧을 보여 준다 — 어느 화면에서 봐도 같은 숫자
+  out.keys = out.keys.map(k => { const sig = sigOf(k.provider, k.tail); const a = actualState.get(sig); return { ...k, ...(a ? { actual: a } : {}), hasAdmin: store.hasSecret(adminName(sig)) }; });
   const synced = pairStates().filter(p => p.d.kind === 'sync');
   if (synced.length) {
     const server = out.source === 'server';
@@ -90,7 +99,7 @@ function state() {
 let pushTimer = null;
 function push() {
   if (pushTimer) return;
-  pushTimer = setTimeout(() => { pushTimer = null; win?.webContents.send('state', state()); updateTray(); }, 120);
+  pushTimer = setTimeout(() => { pushTimer = null; if (quitting || !alive()) return; win.webContents.send('state', state()); updateTray(); }, 120);
 }
 pool.on('change', push);
 pool.on('log', e => { store.counts(pool.snapshot()); usage?.addLog(e); push(); });
@@ -105,7 +114,7 @@ function serverCfg() {
 }
 const viaServer = () => Boolean(serverCfg()) && store.settings().source === 'server';
 const remote = createRemote({ getConfig: serverCfg, onChange: () => push(), notify, mirrorDir: () => store.settings().dataDir || null });
-const toast = msg => win?.webContents.send('toast', msg);
+const toast = msg => { if (alive()) win.webContents.send('toast', msg); };
 /** 서버로 보내는 관리 동작 — 실패하면 화면에 한 줄로 알린다 */
 async function onServer(fn, fallback) {
   try { const r = await fn(); await remote.poll(); return r; }
@@ -141,11 +150,19 @@ async function freshPoll(since) {
   return remote.state();
 }
 let pairSyncing = false;
+let anchorChain = Promise.resolve();
+/** 남은 금액을 바꾸는 작업은 한 번에 하나씩 */
+function withLock(fn) { const run = anchorChain.then(fn, fn); anchorChain = run.catch(() => {}); return run; }
 const pairTried = new Map();
 /** 기준이 어긋난 짝을 다시 맞춘다(처음 서버로 옮겼을 때, 한쪽에서 금액을 고쳤을 때, 크레딧 부족으로 0 이 됐을 때) */
+let pairAgain = false;
 async function syncPairs() {
-  if (pairSyncing || !usage) return;
+  if (!usage) return;
+  if (pairSyncing) { pairAgain = true; return; }   // 진행 중이면 끝난 뒤 한 번 더
   pairSyncing = true;
+  return withLock(() => syncPairsNow());
+}
+async function syncPairsNow() {
   try {
     const recs = { ...(store.settings().pairSync || {}) };
     let changed = false;
@@ -157,6 +174,8 @@ async function syncPairs() {
       pairTried.set(ps.serverId, Date.now());
       try {
         if (d.kind === 'clear') {
+          const r0 = recs[ps.serverId];
+          if (r0 && r0.value === 0) learnRefill({ localId: ps.localId, serverId: ps.serverId, zeroAt: r0.atL });
           if (ps.L.calibrated) usage.clearCalib(ps.localId);
           if (ps.S.calibrated) await remote.api('DELETE', `/admin/keys/${ps.serverId}/calib`);
           delete recs[ps.serverId]; changed = true;
@@ -177,17 +196,128 @@ async function syncPairs() {
       for (const id of Object.keys(recs)) if (!live.has(id)) { delete recs[id]; changed = true; }
     }
     if (changed) store.setSetting('pairSync', recs);
-  } finally { pairSyncing = false; push(); }
+  } finally { pairSyncing = false; push(); if (pairAgain) { pairAgain = false; setTimeout(() => syncPairs(), 0); } }
 }
+// ── 실제 사용액 자동 연동(공식 비용 보고서) ─────────
+// 지금 키로 먼저 읽어 보고(워크스페이스에 묶이지 않은 키면 됨), 안 되는 계정만 관리자 키를 받는다.
+// 남은 금액 = 이번 주기 크레딧 − 실제 사용액. 충전일 0시~그다음 UTC 0시(한국 9시) 사이는 보고서가 하루 단위라 게이트 기록으로 채운다.
+const sigOf = (provider, tail) => `${provider || 'claude'}:${tail}`;
+const adminName = sig => `admin:${sig}`;
+const actualState = new Map();   // sig → { ok, via, cycleCost, remaining, checkedAt, error, needAdmin }
+let actualBusy = false, lastActual = 0, actualAgain = false;
+function actualTargets() {
+  const out = new Map();
+  const meta = new Map(store.meta().map(m => [m.id, m]));
+  for (const k of pool.snapshot()) {
+    const m = meta.get(k.id);
+    if (!m?.credit?.amount || !m?.credit?.day) continue;
+    const sig = sigOf(k.provider, k.tail);
+    out.set(sig, { sig, provider: k.provider || 'claude', name: m.name, localId: k.id, credit: m.credit });
+  }
+  const rs = remote.state();
+  if (serverCfg() && rs.connected) for (const k of rs.data?.keys || []) {
+    if (!k.credit?.amount || !k.credit?.day) continue;
+    const sig = sigOf(k.provider, k.tail);
+    const e = out.get(sig) || { sig, provider: k.provider || 'claude', name: k.name, credit: k.credit };
+    e.serverId = k.id; out.set(sig, e);
+  }
+  return [...out.values()];
+}
+function actualCred(e) {
+  const admin = store.getSecret(adminName(e.sig));
+  if (admin) return { key: admin, via: 'admin' };
+  if ((store.settings().actualProbe || {})[e.sig] === 'denied' || !e.localId) return null;
+  const k = store.keys().find(x => x.id === e.localId);
+  return k ? { key: k.key, via: 'key' } : null;
+}
+const gateSpend = (e, from, to) => {
+  const inRange = (list, id) => (list || []).reduce((a, c) => a + (c.id === id && c.at >= from && c.at < to && c.usd != null ? c.usd : 0), 0);
+  return (e.localId ? inRange(usage.recentCharges(3000), e.localId) : 0) + (e.serverId ? inRange(remote.state().data?.charges, e.serverId) : 0);
+};
+/** 두 곳(이 PC·서버)의 남은 금액을 같은 값으로 맞춘다 */
+async function anchorKey(e, value) {
+  value = Math.round(value * 10000) / 10000;
+  if (e.localId) usage.calibrate(e.localId, value);
+  if (!e.serverId || !serverCfg() || !remote.state().connected) return;
+  try { await remote.api('PATCH', `/admin/keys/${e.serverId}`, { remaining: value }); } catch { return; }
+  const fresh = await freshPoll(Date.now());
+  const sk = (fresh?.data?.keys || []).find(k => k.id === e.serverId);
+  if (e.localId) {
+    const recs = { ...(store.settings().pairSync || {}) };
+    recs[e.serverId] = { localId: e.localId, value, atL: usage.calibOf(e.localId)?.at ?? null, atS: sk?.creditState?.calibratedAt ?? null };
+    store.setSetting('pairSync', recs);
+  }
+}
+async function readActual(e, cred, now = Date.now()) {
+  const cs = e.localId ? usage.creditState(e.localId, e.credit) : (remote.state().data?.keys || []).find(k => k.id === e.serverId)?.creditState;
+  if (!cs?.configured) return null;
+  const A = actual.utcCeil(cs.cycleStart);
+  let res = { ok: true, usd: 0 };
+  if (now > A) res = await (e.provider === 'gpt' ? actual.openaiCost : actual.claudeCost)({ base: e.provider === 'gpt' ? UPSTREAM_GPT : UPSTREAM, key: cred.key, fromMs: A, toMs: actual.utcCeil(now + 1) });
+  if (!res.ok) return res;
+  const cycleCost = res.usd + gateSpend(e, cs.cycleStart, Math.min(A, now));
+  return { ok: true, cycleCost, remaining: Math.max(0, e.credit.amount - cycleCost) };
+}
+async function refreshActual(force = false) {
+  if (!usage || quitting) return;
+  if (actualBusy) { if (force) actualAgain = true; return; }   // 진행 중이면 끝난 뒤 한 번 더
+  if (!force && Date.now() - lastActual < 10 * 60_000) return;
+  actualBusy = true; lastActual = Date.now();
+  return withLock(() => refreshActualNow());
+}
+async function refreshActualNow() {
+  try {
+    for (const e of actualTargets()) {
+      const cred = actualCred(e);
+      const prev = actualState.get(e.sig) || {};
+      if (!cred) { actualState.set(e.sig, { ...prev, ok: false, via: null, needAdmin: true }); continue; }
+      let r;
+      try { r = await readActual(e, cred); } catch { r = { ok: false, status: 0 }; }
+      if (!r) continue;
+      const now = Date.now();
+      if (!r.ok) {
+        const no = actual.denied(r.status);
+        if (no && cred.via === 'key') store.setSetting('actualProbe', { ...(store.settings().actualProbe || {}), [e.sig]: 'denied' });
+        actualState.set(e.sig, { ...prev, ok: false, via: cred.via, checkedAt: now, needAdmin: no,
+          error: no ? (cred.via === 'admin' ? '관리자 키로 비용 보고서를 읽지 못했어요(키가 틀렸거나 다른 조직의 키)' : null) : '비용 보고서를 잠시 읽지 못했어요(다음에 다시 시도)' });
+        continue;
+      }
+      await anchorKey(e, r.remaining);
+      if (cred.via === 'key') store.setSetting('actualProbe', { ...(store.settings().actualProbe || {}), [e.sig]: 'ok' });
+      actualState.set(e.sig, { ok: true, via: cred.via, cycleCost: r.cycleCost, remaining: r.remaining, checkedAt: now, needAdmin: false, error: null });
+    }
+  } finally { actualBusy = false; push(); if (actualAgain) { actualAgain = false; setTimeout(() => refreshActual(true), 0); } }
+}
+setInterval(() => refreshActual(), 60_000).unref?.();
+
+// ── 충전일 스스로 알아내기 ──
+// 크레딧이 바닥나(0) 12시간 넘게 멈췄던 키가 다시 되면 그날을 충전일로 본다(하루 이틀 차이는 무시 — 잡음 방지).
+function learnRefill({ localId, serverId, zeroAt }) {
+  if (!zeroAt || Date.now() - zeroAt < 12 * 3_600_000) return;
+  const today = new Date().getDate();
+  const m = localId ? store.meta().find(k => k.id === localId) : null;
+  const sk = serverId ? (remote.state().data?.keys || []).find(k => k.id === serverId) : null;
+  const credit = m?.credit || sk?.credit;
+  if (!credit?.amount || !credit?.day || actual.dayGap(credit.day, today) < 2) return;
+  const next = { amount: credit.amount, day: today };
+  if (localId) { store.update(localId, { credit: next }); reloadKeys(); }
+  if (serverId) remote.api('PATCH', `/admin/keys/${serverId}`, { credit: next }).catch(() => {});
+  notify(`${m?.name || sk?.name || '키'} 충전일을 매달 ${today}일로 바꿨어요`, `크레딧이 바닥났다가 오늘 다시 들어왔어요(전에는 ${credit.day}일). 아니라면 키 설정에서 고칠 수 있어요.`);
+}
+
 let lastPoll = 0, lastNas = 0;
 setInterval(() => {
-  if (!serverCfg()) return;
-  const fast = viaServer() && win?.isVisible();
+  if (quitting || !serverCfg()) return;
+  const fast = viaServer() && alive() && win.isVisible();
   if (fast || Date.now() - lastPoll > 60_000) { lastPoll = Date.now(); remote.poll().then(() => syncPairs()).catch(() => {}); }
   if (store.settings().dataDir && Date.now() - lastNas > 10 * 60_000) { lastNas = Date.now(); remote.syncNas(); }
 }, 4000).unref?.();
 pool.on('usage', ({ id, model, cost }) => { usage?.record({ keyId: id, model, cost }); lowCreditCheck(id); push(); });
-pool.on('revived', ({ id }) => { const c = usage?.calibOf(id); if (c && c.remaining === 0) usage.clearCalib(id); });
+pool.on('revived', ({ id }) => {
+  const c = usage?.calibOf(id);
+  if (c && c.remaining === 0) { learnRefill({ localId: id, serverId: pairOf({ localId: id })?.serverId, zeroAt: c.at }); usage.clearCalib(id); }
+  refreshActual(true);   // 다시 살아났으면 실제 사용액도 바로 다시 읽는다
+});
 const lowWarned = new Map();
 function lowCreditCheck(id) {
   const m = store.meta().find(k => k.id === id);
@@ -237,7 +367,7 @@ function createWindow() {
   win.webContents.on('will-navigate', e => e.preventDefault());
 }
 
-function showWindow() { if (!win) createWindow(); win.show(); win.focus(); }
+function showWindow() { if (!alive()) createWindow(); win.show(); win.focus(); }
 
 function updateTray() {
   if (!tray) return;
@@ -313,6 +443,7 @@ ipcMain.handle('set-credit', async (_e, { id, amount, day, remaining }) => {
     const r = await onServer(() => remote.api('PATCH', `/admin/keys/${id}`, { credit: { amount, day }, remaining }));
     if (pair) { store.update(pair.localId, { credit }); reloadKeys(); }
     await syncPairs();
+    refreshActual(true);
     return r;
   }
   const pair = pairOf({ localId: id });
@@ -321,7 +452,39 @@ ipcMain.handle('set-credit', async (_e, { id, amount, day, remaining }) => {
   reloadKeys();
   if (pair) await onServer(() => remote.api('PATCH', `/admin/keys/${pair.serverId}`, { credit: { amount, day } }));
   await syncPairs();
+  refreshActual(true);
 });
+/** 화면의 키(이 PC 또는 서버) → 종류·끝자리 */
+function viewKey(id) {
+  const list = viaServer() ? (remote.state().data?.keys || []) : pool.snapshot();
+  const k = list.find(x => x.id === id);
+  return k ? { sig: sigOf(k.provider, k.tail), provider: k.provider || 'claude' } : null;
+}
+ipcMain.handle('set-admin-key', async (_e, { id, key }) => {
+  const vk = viewKey(id); if (!vk) return { ok: false, error: '키를 찾지 못했어요' };
+  const k = String(key || '').trim();
+  const kind = actual.adminKeyKind(k);
+  if (!kind) return { ok: false, error: vk.provider === 'gpt' ? 'OpenAI 관리자 키는 sk-admin- 으로 시작해요' : 'Claude 관리자 키는 sk-ant-admin 으로 시작해요' };
+  if (kind !== vk.provider) return { ok: false, error: kind === 'gpt' ? '이건 OpenAI 관리자 키예요. Claude 키에는 Claude 관리자 키(sk-ant-admin…)를 넣어 주세요' : '이건 Claude 관리자 키예요. GPT 키에는 OpenAI 관리자 키(sk-admin-…)를 넣어 주세요' };
+  const e = actualTargets().find(t => t.sig === vk.sig);
+  if (!e) return { ok: false, error: '먼저 매달 받는 크레딧과 충전일을 저장해 주세요' };
+  let r; try { r = await readActual(e, { key: k, via: 'admin' }); } catch { r = { ok: false, status: 0 }; }
+  if (!r?.ok) return { ok: false, error: actual.denied(r?.status) ? '이 관리자 키로 비용 보고서를 읽지 못했어요. 키를 만든 계정(조직)이 이 키와 같은지 확인해 주세요' : '비용 보고서에 연결하지 못했어요. 잠시 뒤 다시 해 주세요' };
+  store.setSecret(adminName(vk.sig), k);
+  await withLock(() => anchorKey(e, r.remaining));
+  actualState.set(vk.sig, { ok: true, via: 'admin', cycleCost: r.cycleCost, remaining: r.remaining, checkedAt: Date.now(), needAdmin: false, error: null });
+  push();
+  return { ok: true, cycleCost: r.cycleCost, remaining: r.remaining };
+});
+ipcMain.handle('clear-admin-key', async (_e, { id }) => {
+  const vk = viewKey(id); if (!vk) return { ok: false };
+  store.setSecret(adminName(vk.sig), null);
+  actualState.delete(vk.sig);
+  const probe = { ...(store.settings().actualProbe || {}) }; delete probe[vk.sig]; store.setSetting('actualProbe', probe);
+  refreshActual(true); push();
+  return { ok: true };
+});
+ipcMain.handle('refresh-actual', async () => { await refreshActual(true); return true; });
 ipcMain.handle('clear-calib', async (_e, { id }) => {
   const pair = pairOf(viaServer() ? { serverId: id } : { localId: id });
   if (viaServer() || pair) await onServer(() => remote.api('DELETE', `/admin/keys/${pair ? pair.serverId : id}/calib`));
@@ -352,7 +515,7 @@ ipcMain.handle('server-connect', async (_e, { url, token }) => {
   try { await remote.api('GET', '/admin/state', null, { config: { url: u, token: t }, timeout: 20000 }); }
   catch (e) { return { ok: false, error: remote.friendly(e) }; }
   store.setSetting('serverUrl', u); store.setSecret('serverToken', t); store.setSetting('source', 'server');
-  remote.reset(); await remote.poll(); remote.syncNas(); syncPairs(); push();
+  remote.reset(); await remote.poll(); remote.syncNas(); syncPairs().then(() => refreshActual(true)); push();
   return { ok: true };
 });
 ipcMain.handle('server-disconnect', () => { store.setSetting('serverUrl', null); store.setSecret('serverToken', null); store.setSetting('source', 'local'); remote.reset(); push(); });
@@ -420,12 +583,12 @@ function applyUpdate(force = false) {
   if (st?.status !== 'ready') return false;
   const busy = pool.snapshot().some(k => k.state === 'live');
   const idle = Date.now() - lastActivity > 60_000;
-  const away = !win || !win.isVisible() || !win.isFocused();
+  const away = !alive() || !win.isVisible() || !win.isFocused();
   if (!force && (busy || !idle || !away)) return false;
   let ofs; try { ofs = require('original-fs'); } catch { ofs = fs; }
   try { ofs.writeFileSync(path.join(updatesDir(), 'just-updated.json'), JSON.stringify({ version: st.version, notes: st.notes })); } catch {}
   const args = process.argv.slice(1).filter(a => a !== '--hidden');
-  if (!win || !win.isVisible()) args.push('--hidden');
+  if (!alive() || !win.isVisible()) args.push('--hidden');
   quitting = true; store.flush(); usage?.flush();
   app.relaunch({ args });
   app.exit(0);
@@ -514,7 +677,8 @@ app.whenReady().then(async () => {
   reloadKeys();
   await startPool();
   applyTheme();
-  if (serverCfg()) { remote.poll().then(() => syncPairs()).catch(() => {}); setTimeout(() => remote.syncNas(), 8000); }
+  if (serverCfg()) { remote.poll().then(() => syncPairs()).then(() => refreshActual(true)).catch(() => {}); setTimeout(() => remote.syncNas(), 8000); }
+  else setTimeout(() => refreshActual(true), 5000);
   createWindow();
   createTray();
   applyAutoStart();

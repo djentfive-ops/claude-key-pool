@@ -474,3 +474,6 @@ select.name-input { appearance: auto; }
 .srv-row .store-state.ok { color: var(--standby); }
 
 .src-tabs[hidden], #serverHow[hidden], #localHow[hidden] { display: none !important; }
+
+#actualNote.bad { color: var(--warn-text2); }
+#adminInput { width: 230px; }

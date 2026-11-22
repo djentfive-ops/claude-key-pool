@@ -6,6 +6,7 @@ const http = require('node:http');
 const { Readable, Transform } = require('node:stream');
 const { costOf, costOfGpt } = require('./pricing');
 const { EventEmitter } = require('node:events');
+const crypto = require('node:crypto');
 
 const COOLDOWN_MS = { exhausted: 30 * 60_000, auth: 60 * 60_000, rateDefault: 30_000, rateMax: 10 * 60_000 };
 const KEY_UNUSABLE_400 = /credit balance|usage limit|spend limit/i;
@@ -118,10 +119,24 @@ function usageTap(contentType, provider = 'claude') {
 }
 
 class KeyPool extends EventEmitter {
-  constructor({ port = 4100, host = '127.0.0.1', upstream = 'https://api.anthropic.com', upstreamGpt = 'https://api.openai.com' } = {}) {
+  /**
+   * serverMode: 클라우드(Render)에서 돌 때 — 상태 페이지(/_pool.json)와 주소 안내를 숨기고 /healthz 를 연다.
+   * clientToken: 정하면 요청의 API 키 칸(x-api-key 또는 Bearer)이 이 값과 같아야만 중계한다(오비스 서버 전용 접속 토큰).
+   * route: (req, res) => Promise<boolean> — 관리용 주소(/admin/...)를 먼저 처리할 기회. true 를 돌려주면 중계하지 않는다.
+   */
+  constructor({ port = 4100, host = '127.0.0.1', upstream = 'https://api.anthropic.com', upstreamGpt = 'https://api.openai.com', serverMode = false, clientToken = null, route = null } = {}) {
     super();
     this.port = port; this.host = host; this.upstream = upstream.replace(/\/+$/, ''); this.upstreamGpt = upstreamGpt.replace(/\/+$/, '');
+    this.serverMode = serverMode; this.clientToken = clientToken || null; this.route = route;
     this.slots = []; this.cursor = 0; this.server = null; this.listening = false; this.log = [];
+  }
+
+  tokenOk(req) {
+    if (!this.clientToken) return true;
+    const h = req.headers;
+    const got = String(h['x-api-key'] || String(h.authorization || '').replace(/^Bearer\s+/i, ''));
+    const a = Buffer.from(got), b = Buffer.from(this.clientToken);
+    return a.length === b.length && crypto.timingSafeEqual(a, b);
   }
 
   /** keys: [{id, key, tier:'credit'|'paid', name, uses, fails}] — 순서 = 우선순위. 쉬는 상태는 같은 id 면 이어받는다. */
@@ -277,18 +292,35 @@ class KeyPool extends EventEmitter {
 
   start() {
     return new Promise((resolve, reject) => {
-      this.server = http.createServer((req, res) => {
-        // 브라우저로 주소를 열었을 때 — Anthropic/OpenAI 로 보내지 않고 안내만 보여준다
+      this.server = http.createServer(async (req, res) => {
         const h = req.headers;
-        if (req.method === 'GET' && /text\/html/.test(h.accept || '') && !h['x-api-key'] && !h.authorization && !h['anthropic-version']) {
+        if (this.serverMode && req.method === 'GET' && (req.url === '/healthz' || req.url === '/')) {
+          res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' });
+          return res.end('ok');
+        }
+        if (this.route) {
+          try { if (await this.route(req, res)) return; }
+          catch (e) { if (!res.headersSent) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: String(e?.message || e) })); } return; }
+        }
+        // 브라우저로 주소를 열었을 때 — Anthropic/OpenAI 로 보내지 않고 안내만 보여준다
+        if (!this.serverMode && req.method === 'GET' && /text\/html/.test(h.accept || '') && !h['x-api-key'] && !h.authorization && !h['anthropic-version']) {
           res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
           return res.end(`<!doctype html><meta charset="utf-8"><title>Claude 키 묶음</title><body style="font-family:system-ui,sans-serif;padding:40px;max-width:560px;line-height:1.6;color:#1A2233">
 <h2 style="margin:0 0 8px">Claude 키 묶음이 켜져 있어요</h2><p>이 주소는 <b>프로그램이 쓰는 주소</b>예요. 브라우저로 열 곳은 아니에요.<br>키 상태와 크레딧 현황은 <b>Claude 키 묶음 앱 창</b>에서 보세요(작업 표시줄 오른쪽 아래 아이콘).</p>
 <p style="color:#667085">Claude 프로그램: http://${this.host}:${this.port} &nbsp; GPT 프로그램: http://${this.host}:${this.port}/v1 &nbsp; API 키 칸: local</p></body>`);
         }
-        if (req.method === 'GET' && req.url === '/_pool.json') {
+        if (!this.serverMode && req.method === 'GET' && req.url === '/_pool.json') {
           res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
           return res.end(JSON.stringify(this.snapshot()));
+        }
+        if (!this.tokenOk(req)) {
+          // 접속 토큰이 틀림 — 진짜 키를 쓰지 않고 바로 거절(오비스 서버 설정 실수를 기록으로 남김)
+          const r = routeOf(req);
+          this.pushLog({ name: '—', provider: r.provider, path: r.url.split('?')[0], model: null, status: 401, ms: 0, note: '접속 토큰이 틀림' });
+          req.resume();
+          res.writeHead(401, { 'content-type': 'application/json' });
+          const message = 'Claude 키 묶음 서버: 접속 토큰이 맞지 않습니다';
+          return res.end(JSON.stringify(r.provider === 'gpt' ? { error: { message, type: 'invalid_request_error', code: 'invalid_api_key' } } : { type: 'error', error: { type: 'authentication_error', message } }));
         }
         this.handle(req, res).catch(e => {
           if (e?.name === 'AbortError') return;

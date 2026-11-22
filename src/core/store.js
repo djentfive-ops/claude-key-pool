@@ -53,6 +53,9 @@ function move(id, dir) {
 function counts(list) { for (const s of list) { const k = data.keys.find(x => x.id === s.id); if (k) { k.uses = s.uses; k.fails = s.fails; } } save(); }
 function meta() { return data.keys.map(k => ({ id: k.id, name: k.name, tier: k.tier, provider: k.provider || 'claude', credit: k.credit ?? null })); }
 function settings() { return data.settings; }
+// 관리 토큰 같은 비밀값 — 키와 같은 방식(윈도우 계정 암호화)으로 감싸서 저장
+function setSecret(name, value) { data.secrets = data.secrets || {}; if (value) data.secrets[name] = seal(String(value)); else delete data.secrets[name]; save(true); }
+function getSecret(name) { try { const v = data.secrets?.[name]; return v ? unseal(v) : null; } catch { return null; } }
 function setSetting(k, v) { data.settings[k] = v; save(true); }
 
-module.exports = { load, meta, keys, hasKey, addKey, update, remove, move, counts, settings, setSetting, flush: () => save(true) };
+module.exports = { load, meta, keys, setSecret, getSecret, hasKey, addKey, update, remove, move, counts, settings, setSetting, flush: () => save(true) };

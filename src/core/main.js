@@ -4,6 +4,7 @@ const path = require('node:path');
 const fs = require('node:fs');
 const { KeyPool, testKey, providerOfKey } = require('./proxy-core');
 const { createUsageStore } = require('./usage-store');
+const { createRemote } = require('./remote');
 const pricing = require('./pricing');
 const { createUpdater } = require('./updater');
 const APP_VERSION = require('./package.json').version;
@@ -38,9 +39,19 @@ const asset = f => path.join(__dirname, 'assets', f);
 function state() {
   const meta = new Map(store.meta().map(m => [m.id, m]));
   const keys = pool.snapshot().map(k => ({ ...k, credit: meta.get(k.id)?.credit ?? null, creditState: usage ? usage.creditState(k.id, meta.get(k.id)?.credit) : null }));
-  return { listening: pool.listening, portError, port: PORT, address: ADDRESS, keys, log: usage ? usage.recentLog(150) : pool.log.slice(0, 40), charges: usage ? usage.recentCharges(300) : [],
+  const out = { listening: pool.listening, portError, port: PORT, address: ADDRESS, keys, log: usage ? usage.recentLog(150) : pool.log.slice(0, 40), charges: usage ? usage.recentCharges(300) : [],
     mirror: usage ? usage.mirrorState() : null,
-    settings: store.settings(), version: APP_VERSION, pricesAsOf: pricing.PRICES_AS_OF, dark: isDark(), update: updater?.state ?? null };
+    settings: { ...store.settings() }, version: APP_VERSION, pricesAsOf: pricing.PRICES_AS_OF, dark: isDark(), update: updater?.state ?? null };
+  // 서버 연결 — "서버"를 고르면 키·기록 화면이 서버 것으로 바뀐다(이 PC 의 중계는 그대로 계속 돈다)
+  const cfg = serverCfg();
+  const rs = remote.state();
+  out.server = cfg ? { url: cfg.url, connected: rs.connected, error: rs.error, at: rs.at, proxyToken: rs.data?.proxyToken ?? null, version: rs.data?.version ?? null, nasAt: rs.nasAt, nasError: rs.nasError } : null;
+  out.source = viaServer() ? 'server' : 'local';
+  if (out.source === 'server') {
+    out.keys = rs.data?.keys ?? []; out.log = rs.data?.log ?? []; out.charges = rs.data?.charges ?? [];
+    if (rs.data?.pricesAsOf) out.pricesAsOf = rs.data.pricesAsOf;
+  }
+  return out;
 }
 let pushTimer = null;
 function push() {
@@ -51,6 +62,28 @@ pool.on('change', push);
 pool.on('log', e => { store.counts(pool.snapshot()); usage?.addLog(e); push(); });
 
 function notify(title, body) { if (Notification.isSupported()) new Notification({ title, body, icon: asset('icon.png'), silent: true }).show(); }
+
+// ── 서버 키 묶음 연결 ─────────────────────────────
+function serverCfg() {
+  const s = store.settings();
+  const token = s.serverUrl ? store.getSecret('serverToken') : null;
+  return s.serverUrl && token ? { url: s.serverUrl, token } : null;
+}
+const viaServer = () => Boolean(serverCfg()) && store.settings().source === 'server';
+const remote = createRemote({ getConfig: serverCfg, onChange: () => push(), notify, mirrorDir: () => store.settings().dataDir || null });
+const toast = msg => win?.webContents.send('toast', msg);
+/** 서버로 보내는 관리 동작 — 실패하면 화면에 한 줄로 알린다 */
+async function onServer(fn, fallback) {
+  try { const r = await fn(); await remote.poll(); return r; }
+  catch (e) { toast(`서버에 반영하지 못했어요: ${remote.friendly(e)}`); return fallback; }
+}
+let lastPoll = 0, lastNas = 0;
+setInterval(() => {
+  if (!serverCfg()) return;
+  const fast = viaServer() && win?.isVisible();
+  if (fast || Date.now() - lastPoll > 60_000) { lastPoll = Date.now(); remote.poll(); }
+  if (store.settings().dataDir && Date.now() - lastNas > 10 * 60_000) { lastNas = Date.now(); remote.syncNas(); }
+}, 4000).unref?.();
 pool.on('usage', ({ id, model, cost }) => { usage?.record({ keyId: id, model, cost }); lowCreditCheck(id); push(); });
 pool.on('revived', ({ id }) => { const c = usage?.calibOf(id); if (c && c.remaining === 0) usage.clearCalib(id); });
 const lowWarned = new Map();
@@ -130,6 +163,7 @@ function applyAutoStart() {
 const KEY_RE = ENV.CKP_ALLOW_ANY_KEY ? /sk-[A-Za-z0-9_\-]{2,}/g : /sk-[A-Za-z0-9_\-]{20,}/g;   // Claude: sk-ant-… / GPT: sk-proj-…, sk-svcacct-…, sk-…
 ipcMain.handle('state', () => state());
 ipcMain.handle('add-keys', async (_e, { text, tier, name }) => {
+  if (viaServer()) return onServer(() => remote.api('POST', '/admin/keys', { text, tier, name }), { added: 0, results: [{ ok: false, message: '서버에 연결할 수 없어요' }] });
   const found = [...new Set(String(text || '').match(KEY_RE) || [])];
   if (!found.length) return { added: 0, results: [{ ok: false, message: 'sk- 로 시작하는 Claude 또는 GPT 키를 붙여넣어 주세요' }] };
   const results = [];
@@ -150,12 +184,13 @@ ipcMain.handle('add-keys', async (_e, { text, tier, name }) => {
   reloadKeys();
   return { added, results };
 });
-ipcMain.handle('rename', (_e, { id, name }) => { store.update(id, { name: String(name).trim().slice(0, 24) || '이름 없음' }); reloadKeys(); });
-ipcMain.handle('set-tier', (_e, { id, tier }) => { store.update(id, { tier: tier === 'paid' ? 'paid' : 'credit' }); reloadKeys(); });
-ipcMain.handle('move', (_e, { id, dir }) => { store.move(id, dir < 0 ? -1 : 1); reloadKeys(); });
-ipcMain.handle('remove', (_e, { id }) => { store.remove(id); reloadKeys(); });
-ipcMain.handle('wake', (_e, { id }) => { pool.wake(id); });
+ipcMain.handle('rename', (_e, { id, name }) => { if (viaServer()) return onServer(() => remote.api('PATCH', `/admin/keys/${id}`, { name })); store.update(id, { name: String(name).trim().slice(0, 24) || '이름 없음' }); reloadKeys(); });
+ipcMain.handle('set-tier', (_e, { id, tier }) => { if (viaServer()) return onServer(() => remote.api('PATCH', `/admin/keys/${id}`, { tier })); store.update(id, { tier: tier === 'paid' ? 'paid' : 'credit' }); reloadKeys(); });
+ipcMain.handle('move', (_e, { id, dir }) => { if (viaServer()) return onServer(() => remote.api('POST', `/admin/keys/${id}/move`, { dir })); store.move(id, dir < 0 ? -1 : 1); reloadKeys(); });
+ipcMain.handle('remove', (_e, { id }) => { if (viaServer()) return onServer(() => remote.api('DELETE', `/admin/keys/${id}`)); store.remove(id); reloadKeys(); });
+ipcMain.handle('wake', (_e, { id }) => { if (viaServer()) return onServer(() => remote.api('POST', `/admin/keys/${id}/wake`)); pool.wake(id); });
 ipcMain.handle('test', async (_e, { id }) => {
+  if (viaServer()) return onServer(() => remote.api('POST', `/admin/keys/${id}/test`, null, { timeout: 30000 }), { ok: false, message: '서버에 연결할 수 없어요' });
   const k = store.keys().find(x => x.id === id);
   if (!k) return { ok: false, message: '키를 찾지 못했습니다' };
   const r = await testKey(k.key, k.provider === 'gpt' ? UPSTREAM_GPT : UPSTREAM, k.provider);
@@ -166,22 +201,48 @@ ipcMain.handle('copy', (_e, text) => { clipboard.writeText(String(text)); return
 ipcMain.handle('set-autostart', (_e, on) => { store.setSetting('autoStart', Boolean(on)); applyAutoStart(); push(); });
 ipcMain.handle('open-external', (_e, url) => { if (/^https:\/\//.test(url)) shell.openExternal(url); });
 ipcMain.handle('set-credit', (_e, { id, amount, day, remaining }) => {
+  if (viaServer()) return onServer(() => remote.api('PATCH', `/admin/keys/${id}`, { credit: { amount, day }, remaining }));
   const a = Number(amount), d = Number(day);
   store.update(id, { credit: a > 0 && d >= 1 && d <= 31 ? { amount: a, day: Math.round(d) } : null });
   if (remaining !== '' && remaining != null && Number.isFinite(Number(remaining))) usage.calibrate(id, Number(remaining));
   reloadKeys();
 });
-ipcMain.handle('clear-calib', (_e, { id }) => { usage.clearCalib(id); push(); });
-ipcMain.handle('report', () => usage.report(store.meta()));
+ipcMain.handle('clear-calib', (_e, { id }) => { if (viaServer()) return onServer(() => remote.api('DELETE', `/admin/keys/${id}/calib`)); usage.clearCalib(id); push(); });
+ipcMain.handle('report', () => viaServer() ? onServer(() => remote.api('GET', '/admin/report'), null) : usage.report(store.meta()));
 ipcMain.handle('export-csv', async () => {
   const names = new Map(store.meta().map(m => [m.id, m.name]));
   const d = new Date(); const stamp = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
   const r = await dialog.showSaveDialog(win, { title: '사용 기록 내보내기', defaultPath: path.join(app.getPath('documents'), `Claude-사용기록-${stamp}.csv`), filters: [{ name: 'CSV (엑셀)', extensions: ['csv'] }] });
   if (r.canceled || !r.filePath) return { ok: false };
-  fs.writeFileSync(r.filePath, usage.csv(id => names.get(id) ?? '삭제된 키'));
+  if (viaServer()) {
+    const text = await onServer(() => remote.api('GET', '/admin/csv?kind=daily', null, { raw: true, timeout: 30000 }), null);
+    if (text == null) return { ok: false };
+    fs.writeFileSync(r.filePath, text);
+  } else fs.writeFileSync(r.filePath, usage.csv(id => names.get(id) ?? '삭제된 키'));
   shell.showItemInFolder(r.filePath);
   return { ok: true, path: r.filePath };
 });
+ipcMain.handle('server-connect', async (_e, { url, token }) => {
+  let u = String(url || '').trim().replace(/\/+$/, '');
+  if (u && !/^https?:\/\//.test(u)) u = 'https://' + u;
+  if (!/^https:\/\/[\w.-]+(:\d+)?$/.test(u) && !/^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(u)) return { ok: false, error: '주소는 https://로 시작하는 Render 주소여야 해요(예: https://claude-keypool.onrender.com)' };
+  const t = String(token || '').trim();
+  if (t.length < 16) return { ok: false, error: '관리 토큰(ADMIN_TOKEN)을 붙여넣어 주세요' };
+  try { await remote.api('GET', '/admin/state', null, { config: { url: u, token: t }, timeout: 20000 }); }
+  catch (e) { return { ok: false, error: remote.friendly(e) }; }
+  store.setSetting('serverUrl', u); store.setSecret('serverToken', t); store.setSetting('source', 'server');
+  remote.reset(); await remote.poll(); remote.syncNas(); push();
+  return { ok: true };
+});
+ipcMain.handle('server-disconnect', () => { store.setSetting('serverUrl', null); store.setSecret('serverToken', null); store.setSetting('source', 'local'); remote.reset(); push(); });
+ipcMain.handle('set-source', async (_e, src) => { store.setSetting('source', src === 'server' ? 'server' : 'local'); if (src === 'server') await remote.poll(); push(); });
+ipcMain.handle('server-import-local', async () => {
+  const keys = store.keys().map(k => ({ key: k.key, tier: k.tier, provider: k.provider, name: k.name, credit: k.credit }));
+  if (!keys.length) return { ok: false, error: '이 PC에 등록된 키가 없어요' };
+  const r = await onServer(() => remote.api('POST', '/admin/import', { keys }, { timeout: 30000 }), null);
+  return r ? { ok: true, ...r } : { ok: false, error: '서버에 연결할 수 없어요' };
+});
+ipcMain.handle('server-sync-nas', async () => { await remote.syncNas(); return remote.state(); });
 ipcMain.handle('set-theme', (_e, theme) => { store.setSetting('theme', ['light', 'dark'].includes(theme) ? theme : 'system'); applyTheme(); push(); });
 ipcMain.handle('check-update', async () => { await updater?.check(); push(); return updater?.state; });
 ipcMain.handle('apply-update', () => applyUpdate(true));
@@ -330,6 +391,7 @@ app.whenReady().then(async () => {
   reloadKeys();
   await startPool();
   applyTheme();
+  if (serverCfg()) { remote.poll(); setTimeout(() => remote.syncNas(), 8000); }
   createWindow();
   createTray();
   applyAutoStart();

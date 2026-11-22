@@ -187,9 +187,11 @@ function renderBay() {
 }
 
 function renderEmpty(bay) {
-  if (bay.querySelector('.empty')) return;
+  const ex = bay.querySelector('.empty');
+  if (ex && ex.dataset.src === S.source) return;
+  if (S.source === 'server') { renderServerEmpty(bay); return; }
   strips.clear();
-  const box = el('div', 'empty');
+  const box = el('div', 'empty'); box.dataset.src = 'local';
   const housing = el('div', 'housing');
   const lamp = el('div', 'lamp'); housing.append(lamp, el('div', 'state-word', '키 없음'));
   const right = el('div');
@@ -239,8 +241,13 @@ function renderLog() {
 // ── 머리·연결 방법 ────────────────────────────
 function renderHead() {
   const a = $('#addr');
-  a.classList.toggle('on', S.listening); a.classList.toggle('off', !S.listening && !!S.portError);
-  $('#addrText').textContent = S.listening ? `켜져 있어요  ${S.address.replace('http://', '')}` : S.portError ? '시작하지 못했어요' : '시작하는 중';
+  const srv = S.source === 'server' && S.server;
+  a.classList.toggle('srv', Boolean(srv && S.server.connected));
+  a.classList.toggle('on', !srv && S.listening); a.classList.toggle('off', srv ? !S.server.connected : (!S.listening && !!S.portError));
+  $('#addrText').textContent = srv
+    ? (S.server.connected ? `서버 연결됨  ${S.server.url.replace(/^https?:\/\//, '')}` : '서버 연결 안 됨')
+    : S.listening ? `켜져 있어요  ${S.address.replace('http://', '')}` : S.portError ? '시작하지 못했어요' : '시작하는 중';
+  $('#copyAddr').textContent = srv ? '서버 주소 복사' : '주소 복사';
   $('#fBase').textContent = S.address;
   $('#fGpt').textContent = `${S.address}/v1`;
   $('#fPs').textContent = psLine();
@@ -260,18 +267,28 @@ function renderHead() {
       toast(S.listening ? '이제 이 앱이 주소를 받아요' : '아직 시작하지 못했어요');
     });
     b.replaceChildren(el('span', null, msg), btn);
+  } else if (S.source === 'server' && S.server && !S.server.connected && S.server.error) {
+    // 서버를 못 받아와도 서버 자체는 Render 에서 계속 돈다 — 마지막으로 받은 정보를 보여준다
+    b.hidden = false;
+    const btn = el('button', 'ghost', '다시 연결'); btn.type = 'button';
+    btn.addEventListener('click', async () => { btn.disabled = true; await window.pool.setSource('server'); });
+    b.replaceChildren(el('span', null, `서버에 연결할 수 없어요: ${S.server.error}.${S.server.at ? ` ${hhmm(S.server.at)}에 받은 정보를 보여주고 있어요.` : ''} 서버는 Render에서 따로 계속 돌고 있어요.`), btn);
   } else b.hidden = true;
 }
 const psLine = () => `$env:ANTHROPIC_BASE_URL="${S.address}"; $env:ANTHROPIC_API_KEY="local"; claude -p "할 일"`;
 const psGpt = () => `$env:OPENAI_BASE_URL="${S.address}/v1"; $env:OPENAI_API_KEY="local"`;
 
-function render() { if (!S) return; renderTheme(); renderUpdate(); renderHead(); renderBay(); renderCredit(); renderCharges(); renderStore(); renderLog(); if (!$('#usageView').hidden) refreshUsage(); }
+function render() { if (!S) return; renderTheme(); renderUpdate(); renderSource(); renderHead(); renderBay(); renderCredit(); renderCharges(); renderStore(); renderServerRow(); renderLog(); if (!$('#usageView').hidden) refreshUsage(); }
 
 // ── 키 추가 시트 ─────────────────────────────
 const sheet = $('#addSheet');
 const TIER_HELP = { credit: 'Claude는 Max 월간 크레딧 키, GPT는 평소 쓸 키예요. 여러 개면 왼쪽 키부터 다 쓰고 넘어갑니다(캐시 유지).', paid: '먼저 쓰는 키가 모두 쉬는 중일 때만 씁니다. 자동 충전을 켠 키를 넣으세요.' };
 function tierNow() { return sheet.querySelector('input[name=tier]:checked').value; }
-function openSheet() { $('#addText').value = ''; $('#addName').value = ''; $('#addResults').replaceChildren(); $('#tierHelp').textContent = TIER_HELP[tierNow()]; sheet.showModal(); $('#addText').focus(); }
+function openSheet() {
+  const srv = S.source === 'server';
+  $('#addTitle').textContent = srv ? '서버에 키 추가' : '키 추가';
+  $('#importLocal').hidden = !srv;
+  $('#addText').value = ''; $('#addName').value = ''; $('#addResults').replaceChildren(); $('#tierHelp').textContent = TIER_HELP[tierNow()]; sheet.showModal(); $('#addText').focus(); }
 sheet.querySelectorAll('input[name=tier]').forEach(r => r.addEventListener('change', () => { $('#tierHelp').textContent = TIER_HELP[tierNow()]; }));
 $('#addCancel').addEventListener('click', () => sheet.close());
 $('#howKey').addEventListener('click', () => window.pool.openExternal('https://platform.claude.com/settings/keys'));
@@ -286,7 +303,7 @@ $('#addForm').addEventListener('submit', async e => {
 });
 
 // ── 복사·설정 ───────────────────────────────
-$('#copyAddr').addEventListener('click', async () => { await window.pool.copy(S.address); toast('주소를 복사했습니다'); });
+$('#copyAddr').addEventListener('click', async () => { const v = S.source === 'server' && S.server ? S.server.url : S.address; await window.pool.copy(v); toast('주소를 복사했습니다'); });
 document.querySelectorAll('[data-copy]').forEach(b => b.addEventListener('click', async () => {
   const v = { base: S.address, gpt: `${S.address}/v1`, key: 'local', ps: psLine(), psgpt: psGpt() }[b.dataset.copy];
   await window.pool.copy(v); toast('복사했습니다');
@@ -624,3 +641,92 @@ function renderCharges() {
   }
   ol.replaceChildren(...out);
 }
+
+
+// ── 서버 연결 ─────────────────────────────────
+window.pool.onToast(m => toast(m));
+function renderSource() {
+  const has = Boolean(S.server);
+  $('#srcTabs').hidden = !has;
+  document.querySelectorAll('[data-src]').forEach(b => b.setAttribute('aria-selected', String(b.dataset.src === S.source)));
+  const srv = S.source === 'server';
+  $('#serverHow').hidden = !srv; $('#localHow').hidden = srv;
+  $('#howTitle').textContent = srv ? '오비스 서버에 넣을 값' : '프로그램에 연결하기';
+  if (srv && S.server) {
+    $('#sBase').textContent = S.server.url;
+    $('#sGpt').textContent = `${S.server.url}/v1`;
+    const t = S.server.proxyToken;
+    $('#sTok').textContent = t ? `${'•'.repeat(12)}${t.slice(-4)}` : '서버에서 받아오는 중';
+  }
+  if (renderSource.last !== S.source) { renderSource.last = S.source; if (!$('#usageView').hidden) refreshUsage(true); }
+}
+document.querySelectorAll('[data-src]').forEach(b => b.addEventListener('click', async () => {
+  await window.pool.setSource(b.dataset.src);
+  toast(b.dataset.src === 'server' ? '서버의 키와 기록을 보여줘요' : '이 PC의 키와 기록을 보여줘요');
+}));
+const envLines = () => {
+  const u = S.server.url, t = S.server.proxyToken || '';
+  return `ANTHROPIC_BASE_URL=${u}\nANTHROPIC_API_KEY=${t}\nOPENAI_BASE_URL=${u}/v1\nOPENAI_API_KEY=${t}`;
+};
+document.querySelectorAll('[data-scopy]').forEach(b => b.addEventListener('click', async () => {
+  if (!S.server) return;
+  const v = { base: S.server.url, gpt: `${S.server.url}/v1`, tok: S.server.proxyToken || '' }[b.dataset.scopy];
+  if (!v) { toast('아직 서버에서 받아오지 못했어요'); return; }
+  await window.pool.copy(v); toast('복사했습니다');
+}));
+$('#copyEnv').addEventListener('click', async () => {
+  if (!S.server?.proxyToken) { toast('아직 서버에서 받아오지 못했어요'); return; }
+  await window.pool.copy(envLines()); toast('4줄을 복사했어요. 오비스 서버 Environment에 붙여넣으세요');
+});
+async function importLocal() {
+  const r = await window.pool.serverImportLocal();
+  toast(r?.ok ? `서버에 ${r.added}개 넣었어요${r.skipped ? `(이미 있던 ${r.skipped}개는 건너뜀)` : ''}` : (r?.error || '넣지 못했어요'));
+  return r;
+}
+$('#importLocal').addEventListener('click', async () => { const r = await importLocal(); if (r?.ok) sheet.close(); });
+$('#importLocal2').addEventListener('click', importLocal);
+function renderServerEmpty(bay) {
+  strips.clear();
+  const box = el('div', 'empty'); box.dataset.src = 'server';
+  const housing = el('div', 'housing');
+  housing.append(el('div', 'lamp'), el('div', 'state-word', S.server?.connected ? '서버 키 없음' : '연결 중'));
+  const right = el('div');
+  right.append(el('h2', null, '서버에 아직 키가 없어요'));
+  right.append(el('p', null, '이 PC에 등록된 키를 그대로 서버에 넣을 수 있어요. 서버는 이 PC가 꺼져 있어도 그 키로 오비스 서버의 Claude·GPT 호출을 처리해요.'));
+  const row = el('div', 'row');
+  const go = el('button', 'primary', '이 PC 키 전부 서버로 넣기'); go.type = 'button';
+  go.addEventListener('click', async () => { go.disabled = true; await importLocal(); go.disabled = false; });
+  const add = el('button', 'ghost', '새 키 붙여넣기'); add.type = 'button'; add.addEventListener('click', openSheet);
+  row.append(go, add);
+  right.append(row);
+  box.append(housing, right);
+  bay.replaceChildren(box);
+}
+function renderServerRow() {
+  const sv = S.server;
+  $('#srvUrl').textContent = sv ? shortPath(sv.url.replace(/^https?:\/\//, '')) : '연결 안 됨';
+  $('#srvBtn').textContent = sv ? '다시 연결' : '서버 연결하기';
+  $('#srvOff').hidden = !sv;
+  const st = $('#srvState');
+  st.className = 'store-state' + (sv ? (sv.connected ? ' ok' : ' bad') : '');
+  st.textContent = !sv ? '' : sv.connected ? `연결됨${sv.version ? `, 서버 ${sv.version}` : ''}` : '연결 안 됨';
+  $('#srvNote').textContent = !sv ? 'Render에 띄운 키 묶음 서버를 주소와 관리 토큰으로 연결해요. 서버는 이 PC가 꺼져 있어도 혼자 돌아요'
+    : !sv.connected ? (sv.error || '서버에 연결하는 중')
+    : S.settings.dataDir ? (sv.nasError ? `서버 기록 NAS 저장 실패: ${sv.nasError}` : sv.nasAt ? `서버 기록도 NAS 폴더에 저장했어요(${hhmm(sv.nasAt)})` : '서버 기록을 곧 NAS 폴더에 저장해요')
+    : '맨 위 "이 PC / 서버"로 보는 대상을 바꿀 수 있어요';
+}
+const srvSheet = $('#srvSheet');
+$('#srvBtn').addEventListener('click', () => {
+  $('#srvUrlIn').value = S.server?.url || ''; $('#srvTokIn').value = ''; $('#srvResults').replaceChildren();
+  srvSheet.showModal(); (S.server ? $('#srvTokIn') : $('#srvUrlIn')).focus();
+});
+$('#srvCancel').addEventListener('click', () => srvSheet.close());
+$('#srvForm').addEventListener('submit', async e => {
+  e.preventDefault();
+  const btn = $('#srvSubmit'); btn.disabled = true; btn.textContent = '연결하는 중';
+  const r = await window.pool.serverConnect($('#srvUrlIn').value, $('#srvTokIn').value);
+  btn.disabled = false; btn.textContent = '연결하기';
+  if (r.ok) { srvSheet.close(); toast('서버에 연결했어요'); }
+  else $('#srvResults').replaceChildren(el('li', 'ng', r.error));
+});
+$('#srvOff').addEventListener('click', async () => { await window.pool.serverDisconnect(); toast('서버 연결을 해제했어요(서버는 계속 돌아요)'); });

@@ -1,0 +1,30 @@
+# Claude 키 묶음 서버 — Render 블루프린트
+# 오비스 서버와 같은 싱가포르 지역, 항상 켜진 유료 인스턴스 + 작은 영구 디스크(키·기록 보관).
+# server/ 폴더가 바뀔 때만 다시 배포된다(앱 업데이트 파일을 올릴 때는 서버가 재시작되지 않음).
+services:
+  - type: web
+    name: claude-keypool
+    runtime: node
+    region: singapore
+    plan: starter
+    rootDir: server
+    buildCommand: echo "설치할 패키지 없음"
+    startCommand: node index.js
+    healthCheckPath: /healthz
+    autoDeploy: true
+    buildFilter:
+      paths:
+        - server/**
+    disk:
+      name: keypool-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: DATA_DIR
+        value: /var/data
+      - key: KEYPOOL_SECRET
+        generateValue: true
+      - key: ADMIN_TOKEN
+        generateValue: true
+      - key: PROXY_TOKEN
+        generateValue: true

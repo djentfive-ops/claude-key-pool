@@ -463,3 +463,14 @@ select.name-input { appearance: auto; }
 .ver-chip.ready { color: var(--ink); border-color: var(--focus); }
 .ver-chip.ready .ver-dot { background: var(--focus); }
 .ver-chip.err .ver-dot { background: var(--rest); }
+
+/* ── 서버 연결 ─────────────────────────────── */
+.src-tabs button[data-src="server"][aria-selected="true"] { color: var(--focus); }
+.srv-intro { margin: 0 16px 10px; line-height: 1.5; }
+#serverHow .field dt { font-family: "Pretendard", "Malgun Gothic", sans-serif; letter-spacing: 0; }
+.srv-actions { display: flex; gap: 8px; margin: 12px 16px 0; flex-wrap: wrap; }
+.srv-actions .primary, .srv-actions .ghost { font-size: 13px; padding: 7px 12px; }
+.addr.srv .addr-dot { background: var(--focus); box-shadow: 0 0 6px rgba(47,91,234,.5); }
+.srv-row .store-state.ok { color: var(--standby); }
+
+.src-tabs[hidden], #serverHow[hidden], #localHow[hidden] { display: none !important; }

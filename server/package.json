@@ -1,0 +1,9 @@
+{
+  "name": "claude-keypool-server",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Claude 키 묶음 서버 — 오비스 서버가 쓰는 Claude·GPT 키 묶음(관리는 PC 앱에서)",
+  "main": "index.js",
+  "scripts": { "start": "node index.js" },
+  "engines": { "node": ">=20" }
+}

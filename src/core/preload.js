@@ -26,4 +26,10 @@ contextBridge.exposeInMainWorld('pool', {
   clearDataDir: () => call('clear-data-dir'),
   openDataDir: () => call('open-data-dir'),
   takeover: () => call('takeover'),
+  serverConnect: (url, token) => call('server-connect', { url, token }),
+  serverDisconnect: () => call('server-disconnect'),
+  setSource: src => call('set-source', src),
+  serverImportLocal: () => call('server-import-local'),
+  serverSyncNas: () => call('server-sync-nas'),
+  onToast: fn => ipcRenderer.on('toast', (_e, m) => fn(m)),
 });

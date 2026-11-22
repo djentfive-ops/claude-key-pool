@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const { KeyPool, testKey, providerOfKey } = require('./proxy-core');
 const { createUsageStore } = require('./usage-store');
 const { createRemote } = require('./remote');
+const pairs = require('./pairs');
 const pricing = require('./pricing');
 const { createUpdater } = require('./updater');
 const APP_VERSION = require('./package.json').version;
@@ -77,6 +78,13 @@ function state() {
     out.keys = rs.data?.keys ?? []; out.log = rs.data?.log ?? []; out.charges = rs.data?.charges ?? [];
     if (rs.data?.pricesAsOf) out.pricesAsOf = rs.data.pricesAsOf;
   }
+  // 같은 키(이 PC ↔ 서버)는 두 곳 사용액을 합쳐 남은 크레딧을 보여 준다 — 어느 화면에서 봐도 같은 숫자
+  const synced = pairStates().filter(p => p.d.kind === 'sync');
+  if (synced.length) {
+    const server = out.source === 'server';
+    const by = new Map(synced.map(p => [server ? p.serverId : p.localId, p]));
+    out.keys = out.keys.map(k => { const p = by.get(k.id); return p ? { ...k, creditState: server ? pairs.combine(p.S, p.L, p.d.anchor) : pairs.combine(p.L, p.S, p.d.anchor) } : k; });
+  }
   return out;
 }
 let pushTimer = null;
@@ -103,11 +111,79 @@ async function onServer(fn, fallback) {
   try { const r = await fn(); await remote.poll(); return r; }
   catch (e) { toast(`서버에 반영하지 못했어요: ${remote.friendly(e)}`); return fallback; }
 }
+// ── 같은 키 잔액 맞추기(이 PC ↔ 서버) ─────────────
+function currentPairs() {
+  const rs = remote.state(), sk = rs.data?.keys;
+  if (!serverCfg() || !rs.connected || !Array.isArray(sk) || !usage) return [];
+  const local = pool.snapshot().map(k => ({ id: k.id, provider: k.provider || 'claude', tail: k.tail }));   // 복호화 없이(중계가 이미 들고 있는 끝 4자리)
+  return pairs.pairKeys(local, sk);
+}
+const sumSince = (list, id, t) => (list || []).reduce((a, c) => a + (c.id === id && c.at >= t && c.usd != null ? c.usd : 0), 0);
+function pairStates() {
+  const ps = currentPairs();
+  if (!ps.length) return [];
+  const sk = new Map((remote.state().data?.keys || []).map(k => [k.id, k]));
+  const meta = new Map(store.meta().map(m => [m.id, m]));
+  const recs = store.settings().pairSync || {};
+  const localCharges = usage.recentCharges(3000), serverCharges = remote.state().data?.charges || [];
+  return ps.map(p => {
+    const lcredit = meta.get(p.localId)?.credit, scredit = sk.get(p.serverId)?.credit;
+    const L = usage.creditState(p.localId, lcredit), S = sk.get(p.serverId)?.creditState;
+    const d = pairs.decide({ L, S, lcredit, scredit, lcal: usage.calibOf(p.localId), rec: recs[p.serverId],
+      spentS: t => sumSince(serverCharges, p.serverId, t), spentL: t => sumSince(localCharges, p.localId, t) });
+    return { ...p, L, S, d };
+  });
+}
+const pairOf = ({ localId, serverId }) => currentPairs().find(p => (localId && p.localId === localId) || (serverId && p.serverId === serverId)) || null;
+/** 지금 뒤에 받은 서버 상태(다른 읽기가 진행 중이면 끝나길 기다렸다가 한 번 더) */
+async function freshPoll(since) {
+  for (let i = 0; i < 4; i++) { const st = await remote.poll(); if (st?.at >= since) return st; await new Promise(r => setTimeout(r, 700)); }
+  return remote.state();
+}
+let pairSyncing = false;
+const pairTried = new Map();
+/** 기준이 어긋난 짝을 다시 맞춘다(처음 서버로 옮겼을 때, 한쪽에서 금액을 고쳤을 때, 크레딧 부족으로 0 이 됐을 때) */
+async function syncPairs() {
+  if (pairSyncing || !usage) return;
+  pairSyncing = true;
+  try {
+    const recs = { ...(store.settings().pairSync || {}) };
+    let changed = false;
+    for (const ps of pairStates()) {
+      const { d } = ps;
+      if (d.kind === 'sync') { if (d.dropRec && recs[ps.serverId]) { delete recs[ps.serverId]; changed = true; } continue; }
+      if (d.kind === 'skip') continue;
+      if (Date.now() - (pairTried.get(ps.serverId) || 0) < 20_000) continue;
+      pairTried.set(ps.serverId, Date.now());
+      try {
+        if (d.kind === 'clear') {
+          if (ps.L.calibrated) usage.clearCalib(ps.localId);
+          if (ps.S.calibrated) await remote.api('DELETE', `/admin/keys/${ps.serverId}/calib`);
+          delete recs[ps.serverId]; changed = true;
+          await remote.poll();
+        } else if (d.kind === 'push') {
+          const value = Math.round(d.value * 10000) / 10000;
+          await remote.api('PATCH', `/admin/keys/${ps.serverId}`, { remaining: value });
+          usage.calibrate(ps.localId, value);
+          const fresh = await freshPoll(Date.now());
+          const s = (fresh?.data?.keys || []).find(k => k.id === ps.serverId);
+          recs[ps.serverId] = { localId: ps.localId, value, atL: usage.calibOf(ps.localId)?.at ?? null, atS: s?.creditState?.calibratedAt ?? null };
+          changed = true;
+        }
+      } catch {}
+    }
+    if (remote.state().connected) {   // 없어진 짝의 기록은 정리
+      const live = new Set(currentPairs().map(p => p.serverId));
+      for (const id of Object.keys(recs)) if (!live.has(id)) { delete recs[id]; changed = true; }
+    }
+    if (changed) store.setSetting('pairSync', recs);
+  } finally { pairSyncing = false; push(); }
+}
 let lastPoll = 0, lastNas = 0;
 setInterval(() => {
   if (!serverCfg()) return;
   const fast = viaServer() && win?.isVisible();
-  if (fast || Date.now() - lastPoll > 60_000) { lastPoll = Date.now(); remote.poll(); }
+  if (fast || Date.now() - lastPoll > 60_000) { lastPoll = Date.now(); remote.poll().then(() => syncPairs()).catch(() => {}); }
   if (store.settings().dataDir && Date.now() - lastNas > 10 * 60_000) { lastNas = Date.now(); remote.syncNas(); }
 }, 4000).unref?.();
 pool.on('usage', ({ id, model, cost }) => { usage?.record({ keyId: id, model, cost }); lowCreditCheck(id); push(); });
@@ -116,7 +192,8 @@ const lowWarned = new Map();
 function lowCreditCheck(id) {
   const m = store.meta().find(k => k.id === id);
   if (!m?.credit || !usage) return;
-  const cs = usage.creditState(id, m.credit);
+  const p = pairStates().find(x => x.localId === id && x.d.kind === 'sync');
+  const cs = p ? pairs.combine(p.L, p.S, p.d.anchor) : usage.creditState(id, m.credit);
   if (!cs.configured || cs.ratio > 0.1) return;
   if (lowWarned.get(id) === cs.cycleStart) return;
   lowWarned.set(id, cs.cycleStart);
@@ -226,14 +303,32 @@ ipcMain.handle('test', async (_e, { id }) => {
 ipcMain.handle('copy', (_e, text) => { clipboard.writeText(String(text)); return true; });
 ipcMain.handle('set-autostart', (_e, on) => { store.setSetting('autoStart', Boolean(on)); applyAutoStart(); push(); });
 ipcMain.handle('open-external', (_e, url) => { if (/^https:\/\//.test(url)) shell.openExternal(url); });
-ipcMain.handle('set-credit', (_e, { id, amount, day, remaining }) => {
-  if (viaServer()) return onServer(() => remote.api('PATCH', `/admin/keys/${id}`, { credit: { amount, day }, remaining }));
+ipcMain.handle('set-credit', async (_e, { id, amount, day, remaining }) => {
   const a = Number(amount), d = Number(day);
-  store.update(id, { credit: a > 0 && d >= 1 && d <= 31 ? { amount: a, day: Math.round(d) } : null });
-  if (remaining !== '' && remaining != null && Number.isFinite(Number(remaining))) usage.calibrate(id, Number(remaining));
+  const credit = a > 0 && d >= 1 && d <= 31 ? { amount: a, day: Math.round(d) } : null;
+  const hasRemaining = remaining !== '' && remaining != null && Number.isFinite(Number(remaining));
+  // 같은 키가 이 PC 와 서버에 다 있으면 크레딧 설정(금액·충전일)은 양쪽에 같이 넣는다. 남은 금액은 syncPairs 가 양쪽을 맞춘다
+  if (viaServer()) {
+    const pair = pairOf({ serverId: id });
+    const r = await onServer(() => remote.api('PATCH', `/admin/keys/${id}`, { credit: { amount, day }, remaining }));
+    if (pair) { store.update(pair.localId, { credit }); reloadKeys(); }
+    await syncPairs();
+    return r;
+  }
+  const pair = pairOf({ localId: id });
+  store.update(id, { credit });
+  if (hasRemaining) usage.calibrate(id, Number(remaining));
   reloadKeys();
+  if (pair) await onServer(() => remote.api('PATCH', `/admin/keys/${pair.serverId}`, { credit: { amount, day } }));
+  await syncPairs();
 });
-ipcMain.handle('clear-calib', (_e, { id }) => { if (viaServer()) return onServer(() => remote.api('DELETE', `/admin/keys/${id}/calib`)); usage.clearCalib(id); push(); });
+ipcMain.handle('clear-calib', async (_e, { id }) => {
+  const pair = pairOf(viaServer() ? { serverId: id } : { localId: id });
+  if (viaServer() || pair) await onServer(() => remote.api('DELETE', `/admin/keys/${pair ? pair.serverId : id}/calib`));
+  if (!viaServer() || pair) usage.clearCalib(pair ? pair.localId : id);
+  if (pair) { const recs = { ...(store.settings().pairSync || {}) }; delete recs[pair.serverId]; store.setSetting('pairSync', recs); }
+  push();
+});
 ipcMain.handle('report', () => viaServer() ? onServer(() => remote.api('GET', '/admin/report'), null) : usage.report(store.meta()));
 ipcMain.handle('export-csv', async () => {
   const names = new Map(store.meta().map(m => [m.id, m.name]));
@@ -257,7 +352,7 @@ ipcMain.handle('server-connect', async (_e, { url, token }) => {
   try { await remote.api('GET', '/admin/state', null, { config: { url: u, token: t }, timeout: 20000 }); }
   catch (e) { return { ok: false, error: remote.friendly(e) }; }
   store.setSetting('serverUrl', u); store.setSecret('serverToken', t); store.setSetting('source', 'server');
-  remote.reset(); await remote.poll(); remote.syncNas(); push();
+  remote.reset(); await remote.poll(); remote.syncNas(); syncPairs(); push();
   return { ok: true };
 });
 ipcMain.handle('server-disconnect', () => { store.setSetting('serverUrl', null); store.setSecret('serverToken', null); store.setSetting('source', 'local'); remote.reset(); push(); });
@@ -266,6 +361,7 @@ ipcMain.handle('server-import-local', async () => {
   const keys = store.keys().map(k => ({ key: k.key, tier: k.tier, provider: k.provider, name: k.name, credit: k.credit }));
   if (!keys.length) return { ok: false, error: '이 PC에 등록된 키가 없어요' };
   const r = await onServer(() => remote.api('POST', '/admin/import', { keys }, { timeout: 30000 }), null);
+  if (r) await syncPairs();   // 옮긴 키의 남은 금액도 이 PC 값으로 맞춘다
   return r ? { ok: true, ...r } : { ok: false, error: '서버에 연결할 수 없어요' };
 });
 ipcMain.handle('server-sync-nas', async () => { await remote.syncNas(); return remote.state(); });
@@ -418,7 +514,7 @@ app.whenReady().then(async () => {
   reloadKeys();
   await startPool();
   applyTheme();
-  if (serverCfg()) { remote.poll(); setTimeout(() => remote.syncNas(), 8000); }
+  if (serverCfg()) { remote.poll().then(() => syncPairs()).catch(() => {}); setTimeout(() => remote.syncNas(), 8000); }
   createWindow();
   createTray();
   applyAutoStart();
@@ -429,6 +525,10 @@ app.whenReady().then(async () => {
     win.webContents.once('did-finish-load', () => setTimeout(async () => {
       if (ENV.CKP_SCREENSHOT_JS) await win.webContents.executeJavaScript(ENV.CKP_SCREENSHOT_JS).catch(() => {});
       await new Promise(r => setTimeout(r, 600));
+      if (ENV.CKP_STATE_DUMP) {   // 시험용: 두 화면(이 PC / 서버) 상태를 파일로
+        try { const src = store.settings().source; const dump = {}; for (const v of ['local', 'server']) { store.setSetting('source', v); dump[v] = state(); } store.setSetting('source', src); fs.writeFileSync(ENV.CKP_STATE_DUMP, JSON.stringify(dump)); }
+        catch (e) { fs.writeFileSync(ENV.CKP_STATE_DUMP, JSON.stringify({ error: String(e && e.stack || e) })); }
+      }
       const img = await win.webContents.capturePage();
       fs.writeFileSync(ENV.CKP_SCREENSHOT, img.toPNG());
       quitting = true; app.exit(0);

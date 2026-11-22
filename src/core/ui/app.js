@@ -126,7 +126,7 @@ function updateStrip(s, k, index, groupLen) {
     refs.fuelVal.textContent = `약 ${usd(cs.remaining)}`;
     refs.fuelFill.style.width = `${Math.round(cs.ratio * 100)}%`;
     refs.fuelFill.className = level(cs.ratio);
-    refs.fuelSub.textContent = `${usd(cs.amount)} 중, ${mdate(cs.nextRefill)} 다시 충전`;
+    refs.fuelSub.textContent = `${usd(cs.amount)} 중, ${mdate(cs.nextRefill)} 다시 충전${cs.shared ? ' · PC+서버 합산' : ''}`;
   } else {
     refs.fuelLabel.textContent = k.tier === 'paid' ? '이번 달 사용' : '이번 달 사용';
     refs.fuelVal.textContent = usd(cs?.monthUsd ?? 0);
@@ -475,7 +475,8 @@ function openCredit(id) {
   $('#refillDay').value = k.credit?.day ?? new Date().getDate();
   $('#calibInput').value = '';
   const cs = k.creditState;
-  $('#calibNote').textContent = cs?.calibrated ? `${mdate(cs.calibratedAt)}에 실제 금액으로 맞춘 뒤부터 계산하고 있어요.` : 'Console 결제(Billing) 화면의 Promotional credits 금액을 넣으면 그 시점부터 정확하게 이어서 셉니다.';
+  $('#calibNote').textContent = (cs?.calibrated ? `${mdate(cs.calibratedAt)}에 실제 금액으로 맞춘 뒤부터 계산하고 있어요.` : 'Console 결제(Billing) 화면의 Promotional credits 금액을 넣으면 그 시점부터 정확하게 이어서 셉니다.')
+    + (cs?.shared ? ' 이 키는 이 PC와 서버에서 함께 쓰여서, 두 곳 사용액을 합쳐 계산해요(어느 화면에서 고쳐도 양쪽에 같이 들어가요).' : '');
   csheet.showModal();
 }
 $('#creditCancel').addEventListener('click', () => csheet.close());

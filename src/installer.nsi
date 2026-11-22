@@ -1,13 +1,14 @@
-; Claude 키 묶음 — 한 번 누르면 설치되고 바로 켜지는 설치 파일
+; OVIS Gate(오비스 게이트) — 한 번 누르면 설치되고 바로 켜지는 설치 파일
 Unicode true
 ManifestDPIAware true
 SetCompressor /SOLID lzma
 
-!define APPNAME "Claude 키 묶음"
+!define APPNAME "OVIS Gate"
+!define OLDNAME "Claude 키 묶음"   ; 1.5.0 까지의 이름 — 바로 가기 정리용
 !define EXE "ClaudeKeyPool.exe"
 !define REGKEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\ClaudeKeyPool"
 !ifndef VERSION
-  !define VERSION "1.4.0"
+  !define VERSION "1.6.0"
 !endif
 
 Name "${APPNAME}"
@@ -41,6 +42,8 @@ Section "install"
   SetOutPath "$INSTDIR"
   File /r "dist/win-unpacked/*.*"
   WriteUninstaller "$INSTDIR\uninstall.exe"
+  Delete "$DESKTOP\${OLDNAME}.lnk"
+  Delete "$SMPROGRAMS\${OLDNAME}.lnk"
 
   CreateShortCut "$DESKTOP\${APPNAME}.lnk" "$INSTDIR\${EXE}" "" "$INSTDIR\${EXE}" 0
   CreateShortCut "$SMPROGRAMS\${APPNAME}.lnk" "$INSTDIR\${EXE}" "" "$INSTDIR\${EXE}" 0
@@ -64,7 +67,9 @@ Section "uninstall"
   DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "ClaudeKeyPool"
   Delete "$DESKTOP\${APPNAME}.lnk"
   Delete "$SMPROGRAMS\${APPNAME}.lnk"
+  Delete "$DESKTOP\${OLDNAME}.lnk"
+  Delete "$SMPROGRAMS\${OLDNAME}.lnk"
   RMDir /r "$INSTDIR"
   DeleteRegKey HKCU "${REGKEY}"
-  ; 저장된 키(%APPDATA%\Claude 키 묶음)는 남겨 둔다 — 다시 설치하면 그대로 이어진다
+  ; 저장된 키(%APPDATA%\Claude 키 묶음 — 이름을 바꿔도 폴더는 그대로)는 남겨 둔다 — 다시 설치하면 그대로 이어진다
 SectionEnd

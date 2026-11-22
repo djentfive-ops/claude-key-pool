@@ -1,4 +1,4 @@
-// 서버 키 묶음 연결 — PC 앱이 Render 의 키 묶음 서버를 보고 관리한다(관리 토큰 사용).
+// 게이트 서버 연결 — PC 앱이 Render 의 OVIS Gate 서버를 보고 관리한다(관리 토큰 사용).
 // 서버는 PC 가 꺼져 있어도 혼자 돈다. 앱은 켜져 있을 때 상태를 받아오고, 바꾼 내용을 보내고, 서버 기록을 NAS 폴더에도 맞춰 둔다.
 'use strict';
 const fs = require('node:fs');
@@ -78,9 +78,9 @@ function createRemote({ getConfig, onChange, notify, mirrorDir }) {
         api('GET', `/admin/csv?kind=daily&month=${ym}`, null, { raw: true, timeout: 30000 }),
         api('GET', `/admin/csv?kind=charges&month=${ym}`, null, { raw: true, timeout: 30000 }),
       ]);
-      await withTimeout(writeAtomic(path.join(dir, 'Claude키묶음_서버_사용기록.json'), JSON.stringify(ex, null, 1)), 20000);
-      await withTimeout(writeAtomic(path.join(dir, `Claude키묶음_서버_사용기록_${ym}.csv`), daily), 20000);
-      await withTimeout(writeAtomic(path.join(dir, `Claude키묶음_서버_건별요금_${ym}.csv`), charges), 20000);
+      await withTimeout(writeAtomic(path.join(dir, 'OVIS게이트_서버_사용기록.json'), JSON.stringify(ex, null, 1)), 20000);
+      await withTimeout(writeAtomic(path.join(dir, `OVIS게이트_서버_사용기록_${ym}.csv`), daily), 20000);
+      await withTimeout(writeAtomic(path.join(dir, `OVIS게이트_서버_건별요금_${ym}.csv`), charges), 20000);
       st = { ...st, nasAt: Date.now(), nasError: null };
     } catch (e) {
       st = { ...st, nasError: e?.code ? '폴더에 저장하지 못했어요(NAS 연결 확인)' : friendly(e) };

@@ -710,7 +710,7 @@ function renderServerRow() {
   const st = $('#srvState');
   st.className = 'store-state' + (sv ? (sv.connected ? ' ok' : ' bad') : '');
   st.textContent = !sv ? '' : sv.connected ? `연결됨${sv.version ? `, 서버 ${sv.version}` : ''}` : '연결 안 됨';
-  $('#srvNote').textContent = !sv ? 'Render에 띄운 키 묶음 서버를 주소와 관리 토큰으로 연결해요. 서버는 이 PC가 꺼져 있어도 혼자 돌아요'
+  $('#srvNote').textContent = !sv ? 'Render에 띄운 게이트 서버를 주소와 관리 토큰으로 연결해요. 서버는 이 PC가 꺼져 있어도 혼자 돌아요'
     : !sv.connected ? (sv.error || '서버에 연결하는 중')
     : S.settings.dataDir ? (sv.nasError ? `서버 기록 NAS 저장 실패: ${sv.nasError}` : sv.nasAt ? `서버 기록도 NAS 폴더에 저장했어요(${hhmm(sv.nasAt)})` : '서버 기록을 곧 NAS 폴더에 저장해요')
     : '맨 위 "이 PC / 서버"로 보는 대상을 바꿀 수 있어요';

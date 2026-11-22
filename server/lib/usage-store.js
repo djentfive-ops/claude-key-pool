@@ -18,7 +18,8 @@ function cycleOf(day, now = Date.now()) {
   return { start, next: at(n.getFullYear(), n.getMonth()) };
 }
 
-const MIRROR_NAME = 'Claude키묶음_사용기록.json';
+const MIRROR_NAME = 'OVIS게이트_사용기록.json';
+const OLD_PREFIX = 'Claude키묶음_', NEW_PREFIX = 'OVIS게이트_';   // 1.6.0 이름 바꾸기 — 예전 이름 파일은 새 이름으로 옮긴다(지우지 않음)
 const LOG_KEEP = 300;          // 호출 기록(실패 포함)
 const CHARGE_KEEP = 3000;      // 건별 요금 기록
 const blank = () => ({ days: {}, calib: {}, log: [], charges: [] });
@@ -53,8 +54,8 @@ function createUsageStore(file, { mirrorDir = null, nameOf = id => id } = {}) {
   async function writeCsv() {
     if (!mirror.dir || mirror.ok === false) return;
     const m = new Date(); const ym = `${m.getFullYear()}-${pad(m.getMonth() + 1)}`;
-    try { await withTimeout(writeAtomicAsync(path.join(mirror.dir, `Claude키묶음_사용기록_${ym}.csv`), csv(nameOf, ym)), 20_000); } catch {}
-    try { await withTimeout(writeAtomicAsync(path.join(mirror.dir, `Claude키묶음_건별요금_${ym}.csv`), chargesCsv(nameOf, ym)), 20_000); } catch {}
+    try { await withTimeout(writeAtomicAsync(path.join(mirror.dir, `OVIS게이트_사용기록_${ym}.csv`), csv(nameOf, ym)), 20_000); } catch {}
+    try { await withTimeout(writeAtomicAsync(path.join(mirror.dir, `OVIS게이트_건별요금_${ym}.csv`), chargesCsv(nameOf, ym)), 20_000); } catch {}
   }
   let onMirror = null;
   const save = (now = false) => {
@@ -74,6 +75,11 @@ function createUsageStore(file, { mirrorDir = null, nameOf = id => id } = {}) {
       if (mode === 'startup') { mirror = { dir, ok: false, savedAt: null, error: reason(e) }; onMirror?.(mirror); return { ok: false, error: mirror.error }; }
       return { ok: false, error: '이 폴더에 쓸 수 없어요. NAS가 연결돼 있는지, 쓰기 권한이 있는지 확인하세요' };
     }
+    // 예전 이름(Claude키묶음_…) 파일 → 새 이름(OVIS게이트_…). 새 이름이 이미 있으면 건드리지 않는다
+    try { await withTimeout((async () => { for (const f of await fsp.readdir(dir)) if (f.startsWith(OLD_PREFIX)) {
+      const to = path.join(dir, NEW_PREFIX + f.slice(OLD_PREFIX.length));
+      if (!fs.existsSync(to)) await fsp.rename(path.join(dir, f), to).catch(() => {});
+    } })(), 20_000); } catch {}
     let there = null;
     try { there = { ...blank(), ...JSON.parse(await withTimeout(fsp.readFile(path.join(dir, MIRROR_NAME), 'utf8'), 20_000)) }; } catch {}
     if (there && mode === 'startup') there = null;   // 켜질 때는 이 PC 기록이 원본 — 그대로 이어서 쓴다

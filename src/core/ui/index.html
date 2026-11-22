@@ -3,21 +3,21 @@
 <head>
 <meta charset="utf-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data:; script-src 'self'">
-<title>Claude 키 묶음</title>
+<title>OVIS Gate</title>
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
   <header class="bar">
     <div class="brand">
       <span class="brand-lamp" aria-hidden="true"></span>
-      <h1>Claude 키 묶음</h1>
+      <h1>OVIS Gate</h1>
       <button class="ver-chip" id="verChip" type="button" title="업데이트 확인"><span class="ver-dot" aria-hidden="true"></span><span id="verChipText">v—</span></button>
     </div>
     <div class="tabs" role="tablist" aria-label="화면">
       <button type="button" role="tab" id="tabKeys" aria-selected="true">키 상태</button>
       <button type="button" role="tab" id="tabUsage" aria-selected="false">사용 기록</button>
     </div>
-    <div class="tabs src-tabs" id="srcTabs" role="tablist" aria-label="어느 키 묶음을 볼지" hidden>
+    <div class="tabs src-tabs" id="srcTabs" role="tablist" aria-label="이 PC와 서버 중 어느 쪽을 볼지" hidden>
       <button type="button" role="tab" data-src="local" aria-selected="true">이 PC</button>
       <button type="button" role="tab" data-src="server" aria-selected="false">서버</button>
     </div>
@@ -63,7 +63,7 @@
     <aside class="panel how">
       <div class="panel-head"><h2 id="howTitle">프로그램에 연결하기</h2></div>
       <div id="serverHow" hidden>
-        <p class="hint srv-intro">오비스 서버(Render)의 환경변수에 아래 4개를 넣으면, 서버의 Claude·GPT 호출이 이 키 묶음 서버를 거쳐요.</p>
+        <p class="hint srv-intro">오비스 서버(Render)의 환경변수에 아래 4개를 넣으면, 서버의 Claude·GPT 호출이 이 게이트 서버를 거쳐요.</p>
         <dl class="fields">
           <div class="field"><dt>ANTHROPIC_BASE_URL</dt><dd><code id="sBase"></code><button class="copy" data-scopy="base" type="button">복사</button></dd></div>
           <div class="field"><dt>OPENAI_BASE_URL</dt><dd><code id="sGpt"></code><button class="copy" data-scopy="gpt" type="button">복사</button></dd></div>
@@ -73,7 +73,7 @@
           <button class="primary" id="copyEnv" type="button">4줄 한 번에 복사</button>
           <button class="ghost" id="importLocal2" type="button">이 PC 키 전부 서버로 넣기</button>
         </div>
-        <p class="warn">접속 토큰은 오비스 서버에만 넣으세요. 이 값을 아는 사람은 키 묶음 서버로 Claude·GPT를 부를 수 있어요.</p>
+        <p class="warn">접속 토큰은 오비스 서버에만 넣으세요. 이 값을 아는 사람은 게이트 서버로 Claude·GPT를 부를 수 있어요.</p>
       </div>
       <div id="localHow">
       <dl class="fields">
@@ -114,7 +114,7 @@
       <div class="store-row srv-row">
         <div class="store-top"><span class="store-title">서버 연결</span><span class="store-state" id="srvState"></span></div>
         <div class="store-line"><code id="srvUrl">연결 안 됨</code><button class="copy" id="srvBtn" type="button">서버 연결하기</button></div>
-        <div class="store-sub"><span class="hint" id="srvNote">Render에 띄운 키 묶음 서버를 주소와 관리 토큰으로 연결해요. 서버는 이 PC가 꺼져 있어도 혼자 돌아요</span>
+        <div class="store-sub"><span class="hint" id="srvNote">Render에 띄운 게이트 서버를 주소와 관리 토큰으로 연결해요. 서버는 이 PC가 꺼져 있어도 혼자 돌아요</span>
           <button class="link" id="srvOff" type="button" hidden>해제</button></div>
       </div>
       <div class="ver-row"><span id="verText"></span><span class="grow"></span><button type="button" class="link" id="checkUpd">업데이트 확인</button></div>
@@ -216,7 +216,7 @@
   <dialog class="sheet" id="srvSheet">
     <form method="dialog" id="srvForm">
       <h2>서버 연결</h2>
-      <p class="muted sheet-sub">Render에 띄운 "Claude 키 묶음 서버"를 이 앱에서 보고 관리해요. 서버는 이 PC가 꺼져 있어도 혼자 계속 돌아요.</p>
+      <p class="muted sheet-sub">Render에 띄운 "OVIS Gate 서버"를 이 앱에서 보고 관리해요. 서버는 이 PC가 꺼져 있어도 혼자 계속 돌아요.</p>
       <div class="frow"><span class="flabel">서버 주소</span><input class="name-input" id="srvUrlIn" placeholder="https://claude-keypool.onrender.com" autocomplete="off" spellcheck="false"></div>
       <div class="frow"><span class="flabel">관리 토큰 (ADMIN_TOKEN)</span><input class="name-input" id="srvTokIn" type="password" placeholder="Render → claude-keypool → Environment 의 ADMIN_TOKEN 값" autocomplete="off" spellcheck="false"></div>
       <ul class="results" id="srvResults"></ul>

@@ -1,4 +1,4 @@
-// 키 묶음 프록시 엔진 — 앱 안에서 돈다. 화면(UI)은 이벤트로 상태를 받는다.
+// OVIS Gate 프록시 엔진(키 묶음) — 앱 안에서 돈다. 화면(UI)은 이벤트로 상태를 받는다.
 // 규칙: 크레딧 키를 앞 순서부터 하나씩 끝까지(캐시 유지) → 소진·한도·키 오류·과속이면 그 키를 쉬게 하고 같은 요청을 다음 키로 → 크레딧이 다 쉬면 유료 키.
 // 요청 내용은 기록하지 않는다(모델 이름·결과·걸린 시간만).
 'use strict';
@@ -214,7 +214,7 @@ class KeyPool extends EventEmitter {
 
     if (!this.slots.some(s => s.provider === provider)) {
       res.writeHead(503, { 'content-type': 'application/json' });
-      const message = `Claude 키 묶음: 등록된 ${label} 키가 없습니다`;
+      const message = `OVIS Gate: 등록된 ${label} 키가 없습니다`;
       res.end(JSON.stringify(provider === 'gpt' ? { error: { message, type: 'server_error', code: 'no_keys' } } : { type: 'error', error: { type: 'api_error', message } }));
       this.pushLog({ name: '—', provider, path, model, status: 503, ms: 0, note: `${label} 키 없음` });
       return;
@@ -294,6 +294,8 @@ class KeyPool extends EventEmitter {
     return new Promise((resolve, reject) => {
       this.server = http.createServer(async (req, res) => {
         const h = req.headers;
+        // 키 묶음이 직접 보낸 응답이라는 표시 — 받는 쪽(오비스 서버)이 "키 묶음이 꺼져서 Render 가 대신 낸 502/503" 과 구별하는 데 쓴다
+        res.setHeader('x-keypool', '1');
         if (this.serverMode && req.method === 'GET' && (req.url === '/healthz' || req.url === '/')) {
           res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' });
           return res.end('ok');
@@ -305,8 +307,8 @@ class KeyPool extends EventEmitter {
         // 브라우저로 주소를 열었을 때 — Anthropic/OpenAI 로 보내지 않고 안내만 보여준다
         if (!this.serverMode && req.method === 'GET' && /text\/html/.test(h.accept || '') && !h['x-api-key'] && !h.authorization && !h['anthropic-version']) {
           res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-          return res.end(`<!doctype html><meta charset="utf-8"><title>Claude 키 묶음</title><body style="font-family:system-ui,sans-serif;padding:40px;max-width:560px;line-height:1.6;color:#1A2233">
-<h2 style="margin:0 0 8px">Claude 키 묶음이 켜져 있어요</h2><p>이 주소는 <b>프로그램이 쓰는 주소</b>예요. 브라우저로 열 곳은 아니에요.<br>키 상태와 크레딧 현황은 <b>Claude 키 묶음 앱 창</b>에서 보세요(작업 표시줄 오른쪽 아래 아이콘).</p>
+          return res.end(`<!doctype html><meta charset="utf-8"><title>OVIS Gate</title><body style="font-family:system-ui,sans-serif;padding:40px;max-width:560px;line-height:1.6;color:#1A2233">
+<h2 style="margin:0 0 8px">OVIS Gate가 켜져 있어요</h2><p>이 주소는 <b>프로그램이 쓰는 주소</b>예요. 브라우저로 열 곳은 아니에요.<br>키 상태와 크레딧 현황은 <b>OVIS Gate 앱 창</b>에서 보세요(작업 표시줄 오른쪽 아래 아이콘).</p>
 <p style="color:#667085">Claude 프로그램: http://${this.host}:${this.port} &nbsp; GPT 프로그램: http://${this.host}:${this.port}/v1 &nbsp; API 키 칸: local</p></body>`);
         }
         if (!this.serverMode && req.method === 'GET' && req.url === '/_pool.json') {
@@ -319,13 +321,19 @@ class KeyPool extends EventEmitter {
           this.pushLog({ name: '—', provider: r.provider, path: r.url.split('?')[0], model: null, status: 401, ms: 0, note: '접속 토큰이 틀림' });
           req.resume();
           res.writeHead(401, { 'content-type': 'application/json' });
-          const message = 'Claude 키 묶음 서버: 접속 토큰이 맞지 않습니다';
+          const message = 'OVIS Gate 서버: 접속 토큰이 맞지 않습니다';
           return res.end(JSON.stringify(r.provider === 'gpt' ? { error: { message, type: 'invalid_request_error', code: 'invalid_api_key' } } : { type: 'error', error: { type: 'authentication_error', message } }));
         }
         this.handle(req, res).catch(e => {
           if (e?.name === 'AbortError') return;
-          this.pushLog({ name: '—', path: (req.url || '/').split('?')[0], model: null, status: 502, ms: 0, note: '인터넷 연결 실패' });
-          if (!res.headersSent) { res.writeHead(502, { 'content-type': 'application/json' }); res.end(JSON.stringify({ type: 'error', error: { type: 'api_error', message: 'Claude 키 묶음: Anthropic 서버에 연결하지 못했습니다' } })); }
+          const r = routeOf(req);
+          this.pushLog({ name: '—', provider: r.provider, path: r.url.split('?')[0], model: null, status: 502, ms: 0, note: '인터넷 연결 실패' });
+          if (!res.headersSent) {
+            res.writeHead(502, { 'content-type': 'application/json' });
+            res.end(JSON.stringify(r.provider === 'gpt'
+              ? { error: { message: 'OVIS Gate: OpenAI 서버에 연결하지 못했습니다', type: 'server_error', code: 'upstream_unreachable' } }
+              : { type: 'error', error: { type: 'api_error', message: 'OVIS Gate: Anthropic 서버에 연결하지 못했습니다' } }));
+          }
           else res.destroy();
         });
       });

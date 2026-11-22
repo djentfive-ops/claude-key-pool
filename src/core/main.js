@@ -21,7 +21,33 @@ const startHidden = process.argv.includes('--hidden');
 
 const gotLock = app.requestSingleInstanceLock();   // 이미 켜져 있으면 새로 켜지 않고 기존 창을 띄운다
 if (!gotLock) app.quit();
-app.setAppUserModelId('studio.ovis.claudekeypool');
+const AUMID = 'studio.ovis.claudekeypool';   // 바꾸지 않는다 — 알림·바로 가기가 이 값으로 앱을 알아본다
+app.setAppUserModelId(AUMID);
+
+// 1.6.0 이름 바꾸기: 화면에 보이는 이름만 'OVIS Gate'. 저장 폴더(%APPDATA%\\Claude 키 묶음)·설치 폴더·자동 시작 이름은 그대로 둔다(키·기록이 끊기지 않게).
+const OLD_NAME = 'Claude 키 묶음', NEW_NAME = 'OVIS Gate';
+function renameShortcuts() {
+  if (process.platform !== 'win32' || !app.isPackaged) return;
+  const dirs = [app.getPath('desktop'), path.join(app.getPath('appData'), 'Microsoft', 'Windows', 'Start Menu', 'Programs')];
+  for (const dir of dirs) {
+    try {
+      const oldLnk = path.join(dir, `${OLD_NAME}.lnk`), newLnk = path.join(dir, `${NEW_NAME}.lnk`);
+      if (!fs.existsSync(oldLnk)) continue;
+      let link = {};
+      try { link = shell.readShortcutLink(oldLnk); } catch {}
+      if (!fs.existsSync(newLnk) && !shell.writeShortcutLink(newLnk, 'create', { target: link.target || process.execPath, cwd: link.cwd || path.dirname(process.execPath),
+        icon: link.icon || process.execPath, iconIndex: link.iconIndex || 0, appUserModelId: AUMID, description: NEW_NAME })) continue;
+      fs.unlinkSync(oldLnk);
+    } catch {}
+  }
+  // 프로그램 추가/제거 목록에 보이는 이름 — 설치 항목이 있을 때만 고친다
+  const key = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\ClaudeKeyPool';
+  const { execFile } = require('node:child_process');
+  execFile('reg', ['query', key, '/v', 'DisplayName'], { windowsHide: true }, (err, out) => {
+    if (err || String(out).includes(NEW_NAME)) return;
+    execFile('reg', ['add', key, '/v', 'DisplayName', '/t', 'REG_SZ', '/d', NEW_NAME, '/f'], { windowsHide: true }, () => {});
+  });
+}
 
 let win = null, tray = null, quitting = false, portError = null;
 const pool = new KeyPool({ port: PORT, upstream: UPSTREAM, upstreamGpt: UPSTREAM_GPT });
@@ -63,7 +89,7 @@ pool.on('log', e => { store.counts(pool.snapshot()); usage?.addLog(e); push(); }
 
 function notify(title, body) { if (Notification.isSupported()) new Notification({ title, body, icon: asset('icon.png'), silent: true }).show(); }
 
-// ── 서버 키 묶음 연결 ─────────────────────────────
+// ── 게이트 서버 연결 ─────────────────────────────
 function serverCfg() {
   const s = store.settings();
   const token = s.serverUrl ? store.getSecret('serverToken') : null;
@@ -114,7 +140,7 @@ function reloadKeys() { pool.setKeys(store.keys()); push(); }
 function createWindow() {
   win = new BrowserWindow({
     width: 1100, height: 820, minWidth: 900, minHeight: 680, show: false,
-    title: 'Claude 키 묶음', backgroundColor: THEME[isDark() ? 'dark' : 'light'].plate, icon: asset('icon.png'),
+    title: 'OVIS Gate', backgroundColor: THEME[isDark() ? 'dark' : 'light'].plate, icon: asset('icon.png'),
     titleBarStyle: 'hidden', titleBarOverlay: { color: THEME[isDark() ? 'dark' : 'light'].plate, symbolColor: THEME[isDark() ? 'dark' : 'light'].ink, height: 52 },
     webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, sandbox: true, spellcheck: false },
   });
@@ -127,7 +153,7 @@ function createWindow() {
     e.preventDefault(); win.hide();
     if (!store.settings().trayHintShown) {
       store.setSetting('trayHintShown', true);
-      notify('Claude 키 묶음은 계속 켜져 있어요', '오른쪽 아래 트레이 아이콘에서 다시 열거나 끌 수 있습니다.');
+      notify('OVIS Gate는 계속 켜져 있어요', '오른쪽 아래 트레이 아이콘에서 다시 열거나 끌 수 있습니다.');
     }
   });
   win.webContents.setWindowOpenHandler(({ url }) => { shell.openExternal(url); return { action: 'deny' }; });
@@ -140,7 +166,7 @@ function updateTray() {
   if (!tray) return;
   const snap = pool.snapshot();
   const ready = snap.filter(k => k.state === 'ready' || k.state === 'live').length;
-  tray.setToolTip(portError ? 'Claude 키 묶음 — 시작하지 못함' : `Claude 키 묶음 — 키 ${snap.length}개 중 ${ready}개 사용 가능`);
+  tray.setToolTip(portError ? 'OVIS Gate — 시작하지 못함' : `OVIS Gate — 키 ${snap.length}개 중 ${ready}개 사용 가능`);
 }
 function createTray() {
   tray = new Tray(nativeImage.createFromPath(asset('tray.png')));
@@ -212,7 +238,7 @@ ipcMain.handle('report', () => viaServer() ? onServer(() => remote.api('GET', '/
 ipcMain.handle('export-csv', async () => {
   const names = new Map(store.meta().map(m => [m.id, m.name]));
   const d = new Date(); const stamp = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
-  const r = await dialog.showSaveDialog(win, { title: '사용 기록 내보내기', defaultPath: path.join(app.getPath('documents'), `Claude-사용기록-${stamp}.csv`), filters: [{ name: 'CSV (엑셀)', extensions: ['csv'] }] });
+  const r = await dialog.showSaveDialog(win, { title: '사용 기록 내보내기', defaultPath: path.join(app.getPath('documents'), `OVIS게이트-사용기록-${stamp}.csv`), filters: [{ name: 'CSV (엑셀)', extensions: ['csv'] }] });
   if (r.canceled || !r.filePath) return { ok: false };
   if (viaServer()) {
     const text = await onServer(() => remote.api('GET', '/admin/csv?kind=daily', null, { raw: true, timeout: 30000 }), null);
@@ -255,7 +281,7 @@ ipcMain.handle('choose-data-dir', async () => {
   if (res.conflict) {
     const c = res.conflict;
     const pick = await dialog.showMessageBox(win, { type: 'question', title: '이 폴더에 이미 기록이 있어요',
-      message: '이 폴더에 이미 Claude 키 묶음 사용 기록이 있어요.',
+      message: '이 폴더에 이미 OVIS Gate 사용 기록이 있어요.',
       detail: `폴더의 기록: 요청 ${c.theirs.toLocaleString('ko-KR')}건${c.since ? ` (${c.since}부터)` : ''}\n이 PC의 기록: 요청 ${c.ours.toLocaleString('ko-KR')}건\n\n다른 PC나 다시 설치하기 전 기록이라면 "불러오기"를 고르세요.`,
       buttons: ['폴더의 기록 불러오기', '이 PC 기록으로 덮어쓰기', '취소'], defaultId: 0, cancelId: 2, noLink: true });
     if (pick.response === 2) return { canceled: true };
@@ -378,6 +404,7 @@ app.on('window-all-closed', e => e.preventDefault?.());
 
 app.whenReady().then(async () => {
   if (!gotLock) return;
+  renameShortcuts();   // 1.6.0: 바로 가기·설치 목록 이름을 OVIS Gate 로
   store.load();
   if (ENV.CKP_DATADIR) store.setSetting('dataDir', ENV.CKP_DATADIR);   // 시험용
   usage = createUsageStore(path.join(app.getPath('userData'), 'usage.json'), { nameOf: id => store.meta().find(m => m.id === id)?.name ?? '삭제된 키' });

@@ -1,17 +1,20 @@
 # Claude 키 묶음 서버 — Render 블루프린트
 # 오비스 서버와 같은 싱가포르 지역, 항상 켜진 유료 인스턴스 + 작은 영구 디스크(키·기록 보관).
 # server/ 폴더가 바뀔 때만 다시 배포된다(앱 업데이트 파일을 올릴 때는 서버가 재시작되지 않음).
+# 토큰 3개(ADMIN_TOKEN · PROXY_TOKEN · KEYPOOL_SECRET)는 Render 가 만들어 Render 화면에만 보관한다 — 저장소에는 절대 적지 않는다.
 services:
   - type: web
     name: claude-keypool
     runtime: node
+    # 오비스 서버(ovis-dev · ovis-prod)와 같은 싱가포르 — 서버끼리 가까워 지연이 거의 없다
     region: singapore
-    plan: starter
+    # 항상 켜진 가장 작은 유료 등급(0.5 CPU · 512MB, $7/월 — 오비스 서버와 같은 등급). 디스크는 유료 등급에서만 붙는다.
+    plan: 0.5c-512mb
     rootDir: server
     buildCommand: echo "설치할 패키지 없음"
     startCommand: node index.js
     healthCheckPath: /healthz
-    autoDeploy: true
+    autoDeployTrigger: commit
     buildFilter:
       paths:
         - server/**

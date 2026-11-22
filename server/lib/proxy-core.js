@@ -294,6 +294,8 @@ class KeyPool extends EventEmitter {
     return new Promise((resolve, reject) => {
       this.server = http.createServer(async (req, res) => {
         const h = req.headers;
+        // 키 묶음이 직접 보낸 응답이라는 표시 — 받는 쪽(오비스 서버)이 "키 묶음이 꺼져서 Render 가 대신 낸 502/503" 과 구별하는 데 쓴다
+        res.setHeader('x-keypool', '1');
         if (this.serverMode && req.method === 'GET' && (req.url === '/healthz' || req.url === '/')) {
           res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' });
           return res.end('ok');
@@ -324,8 +326,14 @@ class KeyPool extends EventEmitter {
         }
         this.handle(req, res).catch(e => {
           if (e?.name === 'AbortError') return;
-          this.pushLog({ name: '—', path: (req.url || '/').split('?')[0], model: null, status: 502, ms: 0, note: '인터넷 연결 실패' });
-          if (!res.headersSent) { res.writeHead(502, { 'content-type': 'application/json' }); res.end(JSON.stringify({ type: 'error', error: { type: 'api_error', message: 'Claude 키 묶음: Anthropic 서버에 연결하지 못했습니다' } })); }
+          const r = routeOf(req);
+          this.pushLog({ name: '—', provider: r.provider, path: r.url.split('?')[0], model: null, status: 502, ms: 0, note: '인터넷 연결 실패' });
+          if (!res.headersSent) {
+            res.writeHead(502, { 'content-type': 'application/json' });
+            res.end(JSON.stringify(r.provider === 'gpt'
+              ? { error: { message: 'Claude 키 묶음: OpenAI 서버에 연결하지 못했습니다', type: 'server_error', code: 'upstream_unreachable' } }
+              : { type: 'error', error: { type: 'api_error', message: 'Claude 키 묶음: Anthropic 서버에 연결하지 못했습니다' } }));
+          }
           else res.destroy();
         });
       });

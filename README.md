@@ -22,4 +22,5 @@
 - 환경변수(자동 생성): `ADMIN_TOKEN`(앱 연결용), `PROXY_TOKEN`(오비스 서버의 API 키 칸에 넣는 값), `KEYPOOL_SECRET`(키 암호화)
 - 오비스 서버 쪽: `ANTHROPIC_BASE_URL=<서버 주소>`, `OPENAI_BASE_URL=<서버 주소>/v1`, `ANTHROPIC_API_KEY`·`OPENAI_API_KEY` = `PROXY_TOKEN`
 - 요청 내용은 저장하지 않습니다(모델·토큰 수·요금·결과 상태만 기록).
+- 키 묶음이 직접 낸 응답에는 항상 `x-keypool: 1` 헤더가 붙습니다. 이 헤더 없이 502·503·504 가 오면 키 묶음이 꺼져 있는 것(배포 중 등)이니, 받는 쪽은 그때만 직접 키로 재시도하면 됩니다.
 - `server/lib/` 는 앱의 `src/core/` 에서 복사한 공용 엔진입니다(`proxy-core.js`, `pricing.js`, `usage-store.js`).
